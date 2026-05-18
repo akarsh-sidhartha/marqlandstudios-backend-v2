@@ -1,6 +1,7 @@
 const dotenv = require('dotenv');
+dotenv.config({ override: false });
 // ⚠ MUST call before any require that reads process.env
-dotenv.config();
+//dotenv.config();
 
 const express = require('express');
 const mongoose = require('mongoose');
