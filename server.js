@@ -26,7 +26,7 @@ const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 // ─── Logger — must be required after dotenv.config() ─────────────────────────
 const logger = require('./utils/logger').child({ module: 'server' });
 const { attachRequestId, requestLogger } = require('./middleware/requestLogger');
-
+console.log('Logger loaded OK');
 const whatsappService = require('./services/whatsappService');
 const { startScheduler } = require('./services/trendingProductService');
 const { startTrackingScheduler } = require('./services/shipmentTrackingService');
