@@ -59,8 +59,8 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 : defaultOrigins;
 */
 const allowedOrigins = [
-  process.env.ADMIN_URL.split(',').map(o => o.trim()),   // e.g. https://admin.marqlandstudios.com
-  process.env.CLIENT_URL.split(',').map(o => o.trim()),  // e.g. https://marqlandstudios.com
+  ...process.env.ADMIN_URL.split(',').map(o => o.trim()),
+  ...process.env.CLIENT_URL.split(',').map(o => o.trim()),
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:5000',
@@ -291,7 +291,16 @@ process.on('uncaughtException', (err) => {
 //const PORT = process.env.PORT || (IS_PRODUCTION ? 80 : 5000);
 //const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 5000;
-
+const SOCKET = process.env.LSNODE_SOCKET;if (SOCKET) {
+  app.listen(SOCKET, () => {
+    logger.info('API server started on socket', { socket: SOCKET });
+  });
+} else {
+  app.listen(PORT, () => {
+    logger.info('API server started', { port: PORT });
+  });
+}
+/*
 app.listen(PORT,() => {
   logger.info('API server started', {
     env: IS_PRODUCTION ? 'production' : 'development',
@@ -299,3 +308,4 @@ app.listen(PORT,() => {
     apiBase: IS_PRODUCTION ? 'https://api.marqlandstudios.com' : `http://localhost:${PORT}`,
   });
 });
+*/
