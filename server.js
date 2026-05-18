@@ -2,6 +2,15 @@ const dotenv = require('dotenv');
 dotenv.config({ override: false });
 // ⚠ MUST call before any require that reads process.env
 //dotenv.config();
+// TEMPORARY DEBUG — remove after fixing
+console.log('=== ENV DEBUG ===');
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('PORT:', process.env.PORT);
+console.log('MONGO_URI:', process.env.MONGO_URI ? '✓ set' : '✗ MISSING');
+console.log('ADMIN_URL:', process.env.ADMIN_URL ? '✓ set' : '✗ MISSING');
+console.log('CLIENT_URL:', process.env.CLIENT_URL ? '✓ set' : '✗ MISSING');
+console.log('ALL ENV KEYS:', Object.keys(process.env).join(', '));
+console.log('=================');
 
 const express = require('express');
 const mongoose = require('mongoose');
