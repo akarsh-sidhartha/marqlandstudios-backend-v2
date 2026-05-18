@@ -37,7 +37,7 @@ console.log('axios loaded from ProductRoutes OK');
 const sharp   = require('sharp');
 console.log('sharp loaded from ProductRoutes OK');
 
-const Product      = require('../models/product');
+const Product      = require('../models/Product');
 console.log('Product loaded from ProductRoutes OK');
 const ImagePrompt  = require('../models/ImagePrompt');
 console.log('ImagePrompt loaded from ProductRoutes OK');
