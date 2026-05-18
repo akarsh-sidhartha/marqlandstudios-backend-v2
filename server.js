@@ -96,28 +96,49 @@ app.use(requestLogger);
 
 // marqlandstudios-client routes
 const publicSiteRoutes = require('./routes/public-site/publicSiteRoutes');
-
+console.log('publicSiteRoutes loaded OK');
 // marqlandstudios-admin routes
 const authRoutes = require('./routes/authRoutes');
+console.log('authRoutes loaded OK');
 const productRoutes = require('./routes/productRoutes');
+console.log('productRoutes loaded OK');
 const vendorRoutes = require('./routes/vendorRoutes');
+console.log('vendorRoutes loaded OK');
 const clientRoutes = require('./routes/clientRoutes');
+console.log('clientRoutes loaded OK');
 const catalogueRoutes = require('./routes/catalogueRoutes');
+console.log('catalogueRoutes loaded OK');
 const propertyRoutes = require('./routes/propertyRoutes');
+console.log('propertyRoutes loaded OK');
 const offsiteCatalogueRoutes = require('./routes/offsiteCatalogueRoutes');
+console.log('offsiteCatalogueRoutes loaded OK');
 const orderInquiry = require('./routes/orderInquiryRoute');
+console.log('orderInquiry loaded OK');
 const SamplesProvided = require('./routes/samplesProvided');
+console.log('SamplesProvided loaded OK');
 const SourcingHub = require('./routes/inquiryRoutes');
+console.log('SourcingHub loaded OK');
 const { router: paymentTracker, syncOutlookInvoices } = require('./routes/paymentTrackerRoutes');
+console.log('paymentTracker loaded OK');
+console.log('syncOutlookInvoices loaded OK');
 const activityLogger = require('./middleware/activityLogger');
+console.log('activityLogger loaded OK');
 const { authenticateStatic, routeGuard } = require('./middleware/authMiddleware');
+console.log('authenticateStatic loaded OK');
 const logRoutes = require('./routes/logRoutes');
+console.log('logRoutes loaded OK');
 const imageProcessing = require('./routes/imageProcessingRoutes');
+console.log('imageProcessing loaded OK');
 const trendingProductRoutes = require('./routes/trendingProductRoutes');
+console.log('trendingProductRoutes loaded OK');
 const shipmentRoutes = require('./routes/shipmentRoutes');
+console.log('shipmentRoutes loaded OK');
 const shippingPartnerRoutes = require('./routes/shippingPartnerRoutes');
+console.log('shippingPartnerRoutes loaded OK');
 const leadScoutRoutes = require('./routes/leadScoutRoutes');
+console.log('leadScoutRoutes loaded OK');
 const clientPortalRoutes = require('./routes/clientPortalRoutes');
+console.log('clientPortalRoutes loaded OK');
 
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
