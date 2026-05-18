@@ -46,7 +46,7 @@ const nodemailer   = require('nodemailer');
 
 const ClientPortal = require('../models/ClientPortal');
 const OrderInquiry = require('../models/orderInquiry');
-const Product      = require('../models/product');
+const Product      = require('../models/Product');
 const Property     = require('../models/Property');
 const Shipment     = require('../models/Shipment');
 const { authenticate, authorize } = require('../middleware/authMiddleware');

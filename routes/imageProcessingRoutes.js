@@ -28,7 +28,7 @@ const zlib       = require('zlib');
 const archiver   = require('archiver');
 const sharp      = require('sharp');
 
-const Product     = require('../models/product');
+const Product     = require('../models/Product');
 const ImagePrompt = require('../models/ImagePrompt');
 const { processProductImage }    = require('../services/imageProcessingService');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
