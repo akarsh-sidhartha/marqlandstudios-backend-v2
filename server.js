@@ -278,8 +278,9 @@ process.on('uncaughtException', (err) => {
 });
 
 // ─── Server Startup ───────────────────────────────────────────────────────────
-const PORT = process.env.PORT || (IS_PRODUCTION ? 80 : 5000);
-const HOST = '0.0.0.0';
+//const PORT = process.env.PORT || (IS_PRODUCTION ? 80 : 5000);
+//const HOST = '0.0.0.0';
+const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, HOST, () => {
   logger.info('API server started', {
