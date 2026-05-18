@@ -28,8 +28,11 @@ const logger = require('./utils/logger').child({ module: 'server' });
 const { attachRequestId, requestLogger } = require('./middleware/requestLogger');
 console.log('Logger loaded OK');
 const whatsappService = require('./services/whatsappService');
+console.log('whatsappService loaded OK');
 const { startScheduler } = require('./services/trendingProductService');
+console.log('trendingProductService loaded OK');
 const { startTrackingScheduler } = require('./services/shipmentTrackingService');
+console.log('shipmentTrackingService loaded OK');
 
 /**
  * ─── CORS CONFIGURATION ───────────────────────────────────────────────────────
