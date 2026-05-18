@@ -1,4 +1,6 @@
+console.log('product model: top of file');
 const mongoose = require('mongoose');
+console.log('product model: mongoose OK');
 
 const productSchema = new mongoose.Schema({
   brand: { type: String, required: true },
