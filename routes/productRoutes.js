@@ -23,21 +23,33 @@
  */
 
 const express = require('express');
+console.log('express loaded from ProductRoutes OK');
 const router  = express.Router();
+console.log('router loaded from ProductRoutes OK');
 const fs      = require('fs');
+console.log('fs loaded from ProductRoutes OK');
 const path    = require('path');
+console.log('path loaded from ProductRoutes OK');
 const multer  = require('multer');
+console.log('multer loaded from ProductRoutes OK');
 const axios   = require('axios');
+console.log('axios loaded from ProductRoutes OK');
 const sharp   = require('sharp');
+console.log('sharp loaded from ProductRoutes OK');
 
 const Product      = require('../models/product');
+console.log('Product loaded from ProductRoutes OK');
 const ImagePrompt  = require('../models/ImagePrompt');
+console.log('ImagePrompt loaded from ProductRoutes OK');
 const { processProductImage } = require('../services/imageProcessingService');
+console.log('processProductImage loaded from ProductRoutes OK');
 const logger       = require('../utils/logger').child({ module: 'productRoutes' });
+console.log('logger loaded from ProductRoutes OK');
 
 // ─── Upload directory helpers ─────────────────────────────────────────────────
 
 const INTERNAL_PRODUCTS_BASE = path.join(process.cwd(), 'public', 'uploads', 'internalApp', 'products');
+console.log('INTERNAL_PRODUCTS_BASE value = '+INTERNAL_PRODUCTS_BASE);
 
 const safeCategoryName = (category) =>
   (category || 'uncategorised').trim()
