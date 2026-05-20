@@ -3,52 +3,32 @@
  * backend/routes/propertyRoutes.js
  * Mounted at /api/properties
  *
- *   GET    /                    — list all properties
- *   POST   /                    — create property
- *   PUT    /:id                 — update property
- *   DELETE /:id                 — delete property
- *   POST   /upload-attachment   — upload a property attachment (PDF, image, doc)
+ * STORAGE CHANGES FROM ORIGINAL:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 1. POST /upload-attachment
+ *      BEFORE: multer diskStorage → /uploads/internalApp/property/{type}/{file}
+ *      AFTER:  upload.single('file') → R2 /website/internalApp/portal/
+ *              Returns full https:// URL instead of /uploads/... path
+ *
+ * 2. Removed: attachStorage (diskStorage), uploadAttachment (multer instance),
+ *             getPropertyDir, getPropertyUrl, PROPERTY_TYPE_DIRS, path, fs imports
+ *
+ * Property model has:
+ *   imageUrl     — single image URL (set by frontend directly, not via this route)
+ *   attachments  — array of { name, url, mimeType, size }
+ *                  url now stores R2 https:// URL instead of /uploads/... path
+ *
+ * All other routes (GET, POST, PUT, DELETE) — UNCHANGED.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const express  = require('express');
 const router   = express.Router();
-const multer   = require('multer');
-const path     = require('path');
-const fs       = require('fs');
 const Property = require('../models/Property');
+const upload   = require('../middleware/upload');
 const logger   = require('../utils/logger').child({ module: 'propertyRoutes' });
 
-// ─── Upload directory helpers ─────────────────────────────────────────────────
-// Property type from schema enum: 'Day Outing' | 'Night Stay'
-const PROPERTY_TYPE_DIRS = {
-  'Day Outing': 'day_outing',
-  'Night Stay': 'night_stay',
-};
-
-const getPropertyDir = (type) => {
-  const subfolder = PROPERTY_TYPE_DIRS[type] || 'day_outing';
-  const dir       = path.join(process.cwd(), 'public', 'uploads', 'internalApp', 'property', subfolder);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-};
-
-const getPropertyUrl = (type, filename) => {
-  const subfolder = PROPERTY_TYPE_DIRS[type] || 'day_outing';
-  return `/uploads/internalApp/property/${subfolder}/${filename}`;
-};
-
-// ─── Multer configuration ─────────────────────────────────────────────────────
-// Reads req.body.type to route into the correct day_outing/ or night_stay/ subfolder.
-const attachStorage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, getPropertyDir(req.body.type)),
-  filename:    (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    cb(null, unique + path.extname(file.originalname));
-  },
-});
-const uploadAttachment = multer({ storage: attachStorage, limits: { fileSize: 20 * 1024 * 1024 } });
-
-// ─── GET / — list all properties ─────────────────────────────────────────────
+// ─── GET / — list all properties (UNCHANGED) ─────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const properties = await Property.find().sort({ propertyName: 1 }).lean();
@@ -60,7 +40,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ─── POST / — create property ─────────────────────────────────────────────────
+// ─── POST / — create property (UNCHANGED) ────────────────────────────────────
 router.post('/', async (req, res) => {
   try {
     const property = new Property(req.body);
@@ -73,7 +53,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// ─── PUT /:id — update property ───────────────────────────────────────────────
+// ─── PUT /:id — update property (UNCHANGED) ──────────────────────────────────
 router.put('/:id', async (req, res) => {
   try {
     const property = await Property.findByIdAndUpdate(req.params.id, req.body, { new: true });
@@ -86,7 +66,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// ─── DELETE /:id — delete property ───────────────────────────────────────────
+// ─── DELETE /:id — delete property (UNCHANGED) ───────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
     const property = await Property.findByIdAndDelete(req.params.id);
@@ -99,26 +79,47 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// ─── POST /upload-attachment ──────────────────────────────────────────────────
-// Upload a single property attachment (PDF, image, doc).
-// Body must include: type: 'Day Outing' | 'Night Stay'
-// Returns: { url, name, mimeType, size }
-router.post('/upload-attachment', uploadAttachment.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ message: 'No file provided.' });
-    const propertyType = req.body.type || 'Day Outing';
-    const url          = getPropertyUrl(propertyType, req.file.filename);
-    logger.debug('Property attachment uploaded', { propertyType, filename: req.file.filename, userId: req.user?.id });
-    res.json({
-      url,
-      name:     req.file.originalname,
-      mimeType: req.file.mimetype,
-      size:     req.file.size,
-    });
-  } catch (err) {
-    logger.error('Property attachment upload failed', { error: err.message, stack: err.stack });
-    res.status(500).json({ message: err.message });
+/**
+ * POST /upload-attachment
+ * Upload a single property attachment (PDF, image, doc) to R2.
+ *
+ * CHANGED:
+ *   uploadAttachment.single('file')  →  upload.single('file')
+ *   url = getPropertyUrl(...)        →  url = req.uploadedFile.url  (R2 https://)
+ *
+ * storageRouter decision:
+ *   images (jpeg, png, webp…) → R2 /website/internalApp/portal/
+ *   PDFs / docs               → OneDrive /website/uploads/files/
+ *
+ * Response shape unchanged: { url, name, mimeType, size }
+ * The url field now holds a full https:// URL — frontend renders it directly.
+ */
+router.post('/upload-attachment',
+  (req, _res, next) => { req.r2Folder = 'portal'; next(); },
+  upload.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.uploadedFile) return res.status(400).json({ message: 'No file provided.' });
+
+      logger.debug('Property attachment uploaded', {
+        storage:  req.uploadedFile.storage,
+        url:      req.uploadedFile.url,
+        userId:   req.user?.id,
+      });
+
+      res.json({
+        url:      req.uploadedFile.url,       // R2 or OneDrive https:// URL
+        key:      req.uploadedFile.key,       // for future deletion
+        storage:  req.uploadedFile.storage,   // 'r2' | 'onedrive'
+        name:     req.file.originalname,
+        mimeType: req.file.mimetype,
+        size:     req.file.size,
+      });
+    } catch (err) {
+      logger.error('Property attachment upload failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ message: err.message });
+    }
   }
-});
+);
 
 module.exports = router;

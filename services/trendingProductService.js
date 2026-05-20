@@ -2,43 +2,31 @@
 /**
  * backend/services/trendingProductService.js
  *
- * Daily background service that discovers trending corporate gifting products
- * using the Google Custom Search API (image search), downloads the images,
- * extracts supplier metadata, and saves everything to MongoDB.
+ * STORAGE CHANGE FROM ORIGINAL:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * downloadImage() — was: sharp → fs.writeFileSync → return local /uploads/ path
+ *                   now: sharp → uploadBuffer to R2 → return R2 https:// URL
  *
- * Setup (one-time):
- * ─────────────────
- * 1. Go to https://developers.google.com/custom-search/v1/overview
- *    → "Get a Key" → create a project → copy the API key
+ * R2 path: website/internalApp/trending/{filename}.jpg
  *
- * 2. Go to https://programmablesearchengine.google.com/
- *    → New Search Engine → "Search the entire web" → copy the CX (Search Engine ID)
+ * Two references updated as a result:
+ *   - SAVE_DIR mkdir removed (no local dir needed)
+ *   - TrendingProduct.imageUrl now stores full R2 URL instead of local path
  *
- * 3. Add to .env:
- *      GOOGLE_SEARCH_API_KEY=AIza...
- *      GOOGLE_SEARCH_CX=a1b2c3d4e5f:xyz
- *
- * Free tier: 100 queries/day — this service uses ~30 queries per daily run
- * (10 industries × 3 queries each). Upgrade to paid if needed ($5 per 1000).
- *
- * npm install node-cron axios sharp
+ * Everything else — SerpApi search, supplier extraction, Gemini analysis,
+ * runDiscovery loop, searchByImage, cron scheduler — is UNCHANGED.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const axios        = require('axios');
 const sharp        = require('sharp');
 const logger       = require('../utils/logger').child({ module: 'trendingProductService' });
 const path         = require('path');
-const fs           = require('fs');
 const cron         = require('node-cron');
 const TrendingProduct = require('../models/TrendingProduct');
+const { uploadBuffer } = require('./r2Service'); // ← NEW
 
-// ── Save directory ────────────────────────────────────────────────────────────
-const SAVE_DIR = path.join(process.cwd(), 'public', 'uploads', 'internalApp', 'trending');
-if (!fs.existsSync(SAVE_DIR)) fs.mkdirSync(SAVE_DIR, { recursive: true });
-
-// ── Industry search queries ───────────────────────────────────────────────────
-// Each industry has 4 queries — 2 India-focused, 2 global trend-focused.
-// Daily runs rotate through them (day-of-year mod 4).
+// ── Industry search queries (UNCHANGED) ───────────────────────────────────────
 const INDUSTRY_QUERIES = {
   'IT': [
     'trending corporate gifts IT professionals India 2025',
@@ -102,43 +90,26 @@ const INDUSTRY_QUERIES = {
   ],
 };
 
-// ── Source engines to search ──────────────────────────────────────────────────
-// Each source contributes a different perspective on trending products.
-// All use the same SERPAPI_KEY.
+// ── Source engines (UNCHANGED) ────────────────────────────────────────────────
 const SEARCH_SOURCES = [
-  {
-    id:      'google_images_in',
-    engine:  'google_images',
-    label:   'Google Images (India)',
-    params:  { gl: 'in', hl: 'en' },           // bias to Indian results
-  },
-  {
-    id:      'google_images_global',
-    engine:  'google_images',
-    label:   'Google Images (Global)',
-    params:  { gl: 'us', hl: 'en' },           // global trends
-  },
-  {
-    id:      'pinterest',
-    engine:  'pinterest',
-    label:   'Pinterest',
-    params:  {},                                // Pinterest search
-  },
-  {
-    id:      'google_shopping_in',
-    engine:  'google_shopping',
-    label:   'Google Shopping (India)',
-    params:  { gl: 'in', hl: 'en' },           // Indian product listings with prices
-  },
+  { id: 'google_images_in',     engine: 'google_images',    label: 'Google Images (India)',    params: { gl: 'in', hl: 'en' } },
+  { id: 'google_images_global', engine: 'google_images',    label: 'Google Images (Global)',   params: { gl: 'us', hl: 'en' } },
+  { id: 'pinterest',            engine: 'pinterest',         label: 'Pinterest',                params: {} },
+  { id: 'google_shopping_in',   engine: 'google_shopping',  label: 'Google Shopping (India)',  params: { gl: 'in', hl: 'en' } },
 ];
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers (UNCHANGED) ───────────────────────────────────────────────────────
 const sleep  = ms => new Promise(r => setTimeout(r, ms));
-const domain = url => { try { return new URL(url).hostname.replace('www.',''); } catch { return ''; } };
+const domain = url => { try { return new URL(url).hostname.replace('www.', ''); } catch { return ''; } };
 
 /**
- * Download an image URL and save it locally.
- * Returns the local /uploads/internalApp/trending/<file> path, or null on failure.
+ * Download an image URL, normalise via sharp, upload to R2.
+ *
+ * CHANGED:
+ *   BEFORE: sharp → fs.writeFileSync(SAVE_DIR) → return '/uploads/internalApp/trending/...'
+ *   AFTER:  sharp → uploadBuffer(R2)            → return 'https://<R2_PUBLIC_URL>/website/internalApp/trending/...'
+ *
+ * @returns {Promise<string|null>} R2 https:// URL, or null on failure
  */
 async function downloadImage(imageUrl, filename) {
   try {
@@ -146,7 +117,7 @@ async function downloadImage(imageUrl, filename) {
       responseType: 'arraybuffer',
       timeout:      12000,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MarqlandBot/1.0)' },
-      maxContentLength: 8 * 1024 * 1024, // 8MB max
+      maxContentLength: 8 * 1024 * 1024,
     });
 
     const contentType = res.headers['content-type'] || '';
@@ -155,45 +126,36 @@ async function downloadImage(imageUrl, filename) {
       return null;
     }
 
-    // Normalise to JPEG via sharp — handles webp, png, avif, etc.
-    const outPath  = path.join(SAVE_DIR, filename);
-    await sharp(Buffer.from(res.data))
+    // Normalise to JPEG via sharp — handles webp, png, avif, heic, etc.
+    const jpegBuffer = await sharp(Buffer.from(res.data))
       .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 85 })
-      .toFile(outPath);
+      .toBuffer();
 
-    return `/uploads/internalApp/trending/${filename}`;
+    // Upload to R2 — path: website/internalApp/trending/{filename}
+    const r2Key = `website/internalApp/trending/${filename}`;
+    const { url } = await uploadBuffer(jpegBuffer, 'website/internalApp/trending', '.jpg', 'image/jpeg', r2Key);
+
+    return url; // full R2 https:// URL
   } catch (err) {
-    logger.warn('Image download failed', { error: err.message.slice(0, 80), url: imageUrl.slice(0, 60) });
+    logger.warn('Image download/upload failed', { error: err.message.slice(0, 80), url: imageUrl.slice(0, 60) });
     return null;
   }
 }
 
-/**
- * Search a single engine via SerpApi.
- * Returns array of { title, snippet, link, imageUrl, displayLink, sourceEngine }
- *
- * engine can be: 'google_images' | 'pinterest' | 'google_shopping'
- * extraParams: additional SerpApi params (e.g. { gl: 'in' } for India)
- */
+// ── SerpApi search (UNCHANGED) ────────────────────────────────────────────────
 async function searchSerpApi(query, engine = 'google_images', extraParams = {}, num = 10) {
   const apiKey = process.env.SERPAPI_KEY;
-  if (!apiKey) {
-    logger.warn('SERPAPI_KEY not set — skipping search');
-    return [];
-  }
+  if (!apiKey) { logger.warn('SERPAPI_KEY not set — skipping search'); return []; }
 
   try {
     const params = { api_key: apiKey, engine, q: query, safe: 'active', ...extraParams };
-
-    // Engine-specific pagination param
     if (engine === 'google_images')   params.ijn  = 0;
     if (engine === 'google_shopping') params.num  = Math.min(num, 20);
     if (engine === 'pinterest')       params.page = 1;
 
     const res = await axios.get('https://serpapi.com/search', { params, timeout: 20000 });
 
-    // Normalise results across engines into a common shape
     if (engine === 'google_images') {
       return (res.data.images_results || []).slice(0, num).map(item => ({
         title:        item.title    || '',
@@ -204,7 +166,6 @@ async function searchSerpApi(query, engine = 'google_images', extraParams = {}, 
         sourceEngine: 'google_images',
       }));
     }
-
     if (engine === 'pinterest') {
       return (res.data.pins_results || []).slice(0, num).map(item => ({
         title:        item.title       || item.description?.slice(0, 100) || '',
@@ -215,18 +176,16 @@ async function searchSerpApi(query, engine = 'google_images', extraParams = {}, 
         sourceEngine: 'pinterest',
       }));
     }
-
     if (engine === 'google_shopping') {
       return (res.data.shopping_results || []).slice(0, num).map(item => ({
-        title:        item.title  || '',
-        snippet:      item.source || '',
-        link:         item.link   || item.product_link || '',
+        title:        item.title    || '',
+        snippet:      item.source   || '',
+        link:         item.link     || item.product_link || '',
         imageUrl:     item.thumbnail || '',
         displayLink:  item.source   || domain(item.link || ''),
         sourceEngine: 'google_shopping',
       }));
     }
-
     return [];
   } catch (err) {
     const status = err.response?.status;
@@ -237,19 +196,15 @@ async function searchSerpApi(query, engine = 'google_images', extraParams = {}, 
   }
 }
 
-// Kept for backward compatibility — used by searchByImage
+// Kept for backward compat — used by searchByImage (UNCHANGED)
 async function searchGoogle(query, num = 10) {
   return searchSerpApi(query, 'google_images', { gl: 'in', hl: 'en' }, num);
 }
 
-/**
- * Try to extract basic supplier info from the source page.
- * Best-effort — returns partial data if page is inaccessible.
- */
+// ── Supplier info extraction (UNCHANGED) ──────────────────────────────────────
 async function extractSupplierInfo(pageUrl, displayLink) {
   const supplier = { name: '', website: displayLink || '', email: '', phone: '', country: '' };
 
-  // Well-known B2B supplier directories — extract supplier name from URL patterns
   const knownDirs = {
     'indiamart.com':      'IndiaMart Supplier',
     'alibaba.com':        'Alibaba Supplier',
@@ -262,78 +217,46 @@ async function extractSupplierInfo(pageUrl, displayLink) {
   };
 
   for (const [d, label] of Object.entries(knownDirs)) {
-    if (displayLink?.includes(d)) {
-      supplier.name = label;
-      supplier.country = d.endsWith('.in') ? 'India' : '';
-      break;
-    }
+    if (displayLink?.includes(d)) { supplier.name = label; supplier.country = d.endsWith('.in') ? 'India' : ''; break; }
   }
 
-  // Light page fetch — only attempt if it's a known B2B site (to avoid bans)
   const safeDomains = ['indiamart.com', 'tradeindia.com', 'exportersindia.com'];
   if (safeDomains.some(d => displayLink?.includes(d))) {
     try {
-      const res = await axios.get(pageUrl, {
-        timeout: 8000,
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MarqlandBot/1.0)' },
-        maxContentLength: 500 * 1024, // 500KB max — we only need metadata
-      });
+      const res  = await axios.get(pageUrl, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MarqlandBot/1.0)' }, maxContentLength: 500 * 1024 });
       const html = res.data || '';
-
-      // Extract email
       const emailMatch = html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
       if (emailMatch) supplier.email = emailMatch[0];
-
-      // Extract Indian phone numbers
       const phoneMatch = html.match(/(\+91[\s-]?)?[6-9]\d{9}/);
       if (phoneMatch) supplier.phone = phoneMatch[0];
-
-      // Extract company name from title tag
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (titleMatch && !supplier.name) {
-        supplier.name = titleMatch[1].split(/[-|]/)[0].trim().slice(0, 80);
-      }
-    } catch {
-      // Silent fail — supplier info is best-effort
-    }
+      if (titleMatch && !supplier.name) supplier.name = titleMatch[1].split(/[-|]/)[0].trim().slice(0, 80);
+    } catch { /* silent — best-effort */ }
   }
 
   return supplier;
 }
 
-// ── Core discovery function ───────────────────────────────────────────────────
-/**
- * Run one complete discovery pass across all industries.
- * Called by the daily cron job and by the manual trigger endpoint.
- *
- * @param {string[]} [industries]  Subset of industries to run (default: all)
- * @param {Function} [onProgress]  Optional callback({ industry, done, total, saved })
- */
+// ── Core discovery function (UNCHANGED — downloadImage now returns R2 URL) ────
 async function runDiscovery(industries = Object.keys(INDUSTRY_QUERIES), onProgress) {
   const runDate = new Date();
   const results = { started: runDate, industries: {}, totalSaved: 0, totalSkipped: 0, errors: [] };
 
   logger.info('Trending product discovery started', { industries: industries.length });
 
-  // Rotate which source engine is primary today
-  // Day 0→Google IN, Day 1→Google Global, Day 2→Pinterest, Day 3→Google Shopping
-  const dayOfYear   = Math.floor((runDate - new Date(runDate.getFullYear(), 0, 0)) / 86400000);
-  const primarySrc  = SEARCH_SOURCES[dayOfYear % SEARCH_SOURCES.length];
-  // Always also run Google India as a secondary (most relevant for your market)
-  const secondarySrc = SEARCH_SOURCES[0]; // google_images_in
+  const dayOfYear    = Math.floor((runDate - new Date(runDate.getFullYear(), 0, 0)) / 86400000);
+  const primarySrc   = SEARCH_SOURCES[dayOfYear % SEARCH_SOURCES.length];
+  const secondarySrc = SEARCH_SOURCES[0];
 
   for (const industry of industries) {
-    const queries = INDUSTRY_QUERIES[industry] || [];
+    const queries       = INDUSTRY_QUERIES[industry] || [];
     const industryResult = { saved: 0, skipped: 0, queries: queries.length };
     results.industries[industry] = industryResult;
-
-    // Rotate query index independently
     const query = queries[dayOfYear % queries.length];
 
     logger.debug('Discovery industry sources', { industry, primary: primarySrc.label, secondary: secondarySrc.label });
     logger.debug('Discovery query', { industry, query });
 
-    // Fetch from primary + secondary source, dedupe by imageUrl
     const [primaryResults, secondaryResults] = await Promise.all([
       searchSerpApi(query, primarySrc.engine, primarySrc.params, 8),
       primarySrc.id !== secondarySrc.id
@@ -341,13 +264,11 @@ async function runDiscovery(industries = Object.keys(INDUSTRY_QUERIES), onProgre
         : Promise.resolve([]),
     ]);
 
-    // Dedupe: if same imageUrl appears in both, keep primary
     const seen = new Set();
     const searchResults = [...primaryResults, ...secondaryResults].filter(r => {
       const key = r.imageUrl || r.link;
       if (!key || seen.has(key)) return false;
-      seen.add(key);
-      return true;
+      seen.add(key); return true;
     });
 
     logger.debug('Discovery results fetched', { industry, primary: primaryResults.length, secondary: secondaryResults.length, unique: searchResults.length });
@@ -355,17 +276,12 @@ async function runDiscovery(industries = Object.keys(INDUSTRY_QUERIES), onProgre
 
     for (let i = 0; i < searchResults.length; i++) {
       const result = searchResults[i];
-
       try {
         const exists = await TrendingProduct.findOne({ sourceUrl: result.link });
-        if (exists) {
-          industryResult.skipped++;
-          results.totalSkipped++;
-          continue;
-        }
+        if (exists) { industryResult.skipped++; results.totalSkipped++; continue; }
 
-        const imgFilename = `trending_${Date.now()}_${Math.random().toString(36).slice(2,7)}.jpg`;
-        const localImgUrl = await downloadImage(result.imageUrl, imgFilename);
+        const imgFilename = `trending_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.jpg`;
+        const r2ImgUrl    = await downloadImage(result.imageUrl, imgFilename); // now returns R2 URL
 
         let supplier = { name: '', website: result.displayLink, email: '', phone: '', country: '' };
         try { supplier = await extractSupplierInfo(result.link, result.displayLink); } catch {}
@@ -377,7 +293,7 @@ async function runDiscovery(industries = Object.keys(INDUSTRY_QUERIES), onProgre
               name:         result.title.slice(0, 200),
               description:  result.snippet.slice(0, 500),
               industry,
-              imageUrl:     localImgUrl || '',
+              imageUrl:     r2ImgUrl || '',   // R2 https:// URL (was local /uploads/ path)
               imageSrcUrl:  result.imageUrl,
               sourceUrl:    result.link,
               sourceDomain: result.displayLink || domain(result.link),
@@ -400,65 +316,39 @@ async function runDiscovery(industries = Object.keys(INDUSTRY_QUERIES), onProgre
         results.errors.push({ industry, item: i, error: err.message });
       }
 
-      onProgress?.({ industry, done: i+1, total: searchResults.length, saved: industryResult.saved });
+      onProgress?.({ industry, done: i + 1, total: searchResults.length, saved: industryResult.saved });
       await sleep(1000);
     }
 
     await sleep(2000);
   }
 
-  results.finished  = new Date();
+  results.finished   = new Date();
   results.durationMs = results.finished - results.started;
   logger.info('Trending product discovery complete', { totalSaved: results.totalSaved, totalSkipped: results.totalSkipped, durationSeconds: Math.round(results.durationMs / 1000) });
   return results;
 }
 
-// ── Daily cron ────────────────────────────────────────────────────────────────
-// Runs every day at 02:00 AM server time — quiet period, avoids peak API usage
+// ── Daily cron (UNCHANGED) ────────────────────────────────────────────────────
 let cronJob = null;
 
 function startScheduler() {
-  if (cronJob) return; // already running
+  if (cronJob) return;
   cronJob = cron.schedule('0 2 * * *', async () => {
     logger.info('Trending product daily cron triggered');
-    try {
-      await runDiscovery();
-    } catch (err) {
-      logger.error('Trending product cron run failed', { error: err.message, stack: err.stack });
-    }
-  }, {
-    timezone: 'Asia/Kolkata', // IST — change to your server TZ if needed
-  });
+    try { await runDiscovery(); }
+    catch (err) { logger.error('Trending product cron run failed', { error: err.message, stack: err.stack }); }
+  }, { timezone: 'Asia/Kolkata' });
   logger.info('Trending product daily scheduler started', { schedule: '02:00 IST' });
 }
 
-function stopScheduler() {
-  cronJob?.stop();
-  cronJob = null;
-}
+function stopScheduler() { cronJob?.stop(); cronJob = null; }
 
-// (exports moved to bottom of file)
-
-// ─────────────────────────────────────────────────────────────────────────────
-// IMAGE-BASED SEARCH
-// Uses Gemini Vision to identify the product in the uploaded image, then
-// generates targeted search queries and runs them through Google Image Search.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Send an image buffer to Gemini Vision and get back:
- *   { productName, description, queries[], industry }
- *
- * queries — 3–5 search strings tuned for finding this product + similar ones
- *           in a corporate gifting context.
- */
+// ── Gemini image analysis (UNCHANGED) ────────────────────────────────────────
 async function analyseImageWithGemini(imageBuffer) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not set');
 
-  // Resize down to max 512px before encoding — keeps base64 payload small
-  // and prevents Gemini from timing out on large uploads.
-  // Sharp handles any input format (JPEG, PNG, WEBP, HEIC, etc.)
   let processedBuffer;
   try {
     processedBuffer = await sharp(imageBuffer)
@@ -471,9 +361,7 @@ async function analyseImageWithGemini(imageBuffer) {
     processedBuffer = imageBuffer;
   }
 
-  const mimeType = 'image/jpeg'; // always JPEG after sharp
-  const base64   = processedBuffer.toString('base64');
-
+  const base64 = processedBuffer.toString('base64');
   const prompt = `You are a corporate gifting product specialist.
 
 Analyse the product shown in this image and respond with ONLY valid JSON — no markdown, no explanation, nothing else.
@@ -493,66 +381,38 @@ Analyse the product shown in this image and respond with ONLY valid JSON — no 
 
 Make queries specific and actionable for finding real product listings and suppliers online.`;
 
-  // Use the same model env var as the rest of the app — avoids 404 when Google renames models
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   const res = await axios.post(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
     {
-      contents: [{
-        parts: [
-          { inline_data: { mime_type: mimeType, data: base64 } },
-          { text: prompt },
-        ],
-      }],
+      contents: [{ parts: [{ inline_data: { mime_type: 'image/jpeg', data: base64 } }, { text: prompt }] }],
       generationConfig: { temperature: 0.2 },
     },
     { timeout: 60000 }
   );
 
-  const raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  // Strip possible markdown fences
+  const raw   = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   const clean = raw.replace(/```json|```/g, '').trim();
-
-  try {
-    return JSON.parse(clean);
-  } catch {
-    throw new Error(`Gemini returned unparseable response: ${raw.slice(0, 120)}`);
-  }
+  try { return JSON.parse(clean); }
+  catch { throw new Error(`Gemini returned unparseable response: ${raw.slice(0, 120)}`); }
 }
 
-/**
- * Full image-search pipeline:
- *  1. Gemini identifies the product and generates search queries
- *  2. Run each query through Google Image Search
- *  3. Download images + extract supplier info
- *  4. Save to DB under the detected industry
- *  5. Return saved product IDs + the Gemini analysis
- *
- * @param {Buffer}   imageBuffer   Raw image bytes from the upload
- * @param {Function} [onProgress]  Optional progress callback
- * @returns {{ analysis, saved, skipped, productIds }}
- */
+// ── searchByImage (UNCHANGED — downloadImage returns R2 URL automatically) ────
 async function searchByImage(imageBuffer, onProgress) {
-  // Step 1: Gemini analysis
   onProgress?.({ stage: 'analysing', message: 'Gemini is identifying the product…' });
   const analysis = await analyseImageWithGemini(imageBuffer);
   logger.info('Image search product identified', { productName: analysis.productName, queries: analysis.queries.length, industry: analysis.industry });
 
-  const industry   = analysis.industry || 'General';
-  const savedIds   = [];
-  let   skipped    = 0;
+  const industry = analysis.industry || 'General';
+  const savedIds = [];
+  let   skipped  = 0;
   let   queryIndex = 0;
 
-  // Step 2–4: Run each query
   for (const query of analysis.queries) {
     queryIndex++;
-    onProgress?.({
-      stage:   'searching',
-      message: `Searching (${queryIndex}/${analysis.queries.length}): ${query}`,
-      query,
-    });
-
+    onProgress?.({ stage: 'searching', message: `Searching (${queryIndex}/${analysis.queries.length}): ${query}`, query });
     logger.debug('Image search query', { queryIndex, query });
+
     const results = await searchGoogle(query, 10);
     logger.debug('Image search results', { queryIndex, count: results.length });
 
@@ -561,8 +421,8 @@ async function searchByImage(imageBuffer, onProgress) {
         const exists = await TrendingProduct.findOne({ sourceUrl: result.link });
         if (exists) { skipped++; continue; }
 
-        const imgFilename = `trending_img_${Date.now()}_${Math.random().toString(36).slice(2,7)}.jpg`;
-        const localImgUrl = await downloadImage(result.imageUrl, imgFilename);
+        const imgFilename = `trending_img_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.jpg`;
+        const r2ImgUrl    = await downloadImage(result.imageUrl, imgFilename); // R2 URL
 
         let supplier = { name: '', website: result.displayLink, email: '', phone: '', country: '' };
         try { supplier = await extractSupplierInfo(result.link, result.displayLink); } catch {}
@@ -574,7 +434,7 @@ async function searchByImage(imageBuffer, onProgress) {
               name:         result.title.slice(0, 200),
               description:  result.snippet.slice(0, 500),
               industry,
-              imageUrl:     localImgUrl || '',
+              imageUrl:     r2ImgUrl || '',   // R2 https:// URL
               imageSrcUrl:  result.imageUrl,
               sourceUrl:    result.link,
               sourceDomain: result.displayLink || domain(result.link),
@@ -594,13 +454,11 @@ async function searchByImage(imageBuffer, onProgress) {
       }
       await sleep(1000);
     }
-
-    await sleep(2000); // between queries
+    await sleep(2000);
   }
 
   onProgress?.({ stage: 'done', message: `Done — ${savedIds.length} products saved` });
   logger.info('Image search complete', { saved: savedIds.length, skipped });
-
   return { analysis, saved: savedIds.length, skipped, productIds: savedIds };
 }
 

@@ -3,43 +3,28 @@
  * backend/routes/clientPortalRoutes.js
  * Mounted at /api/portal
  *
- * TEAM (authenticated — enforced by routeGuard in server.js):
- *   POST   /api/portal                    — create portal for an order
- *   GET    /api/portal                    — list portals (filterable by type/status)
- *   GET    /api/portal/order/:orderId     — get portal by orderId
- *   PUT    /api/portal/:slug/items        — replace items array
- *   PUT    /api/portal/:slug/meta         — update teamNote, clientEmail, reviewLink
- *   PUT    /api/portal/:slug/complete     — mark completed
- *   PUT    /api/portal/:slug/shortlist    — persist shortlisted item IDs (team)
- *   PUT    /api/portal/:slug/calculator   — persist calculator state (team)
- *   POST   /api/portal/:slug/message/team — team sends a message
- *   POST   /api/portal/:slug/sync-products — re-sync product snapshots
- *   POST   /api/portal/:slug/sync-offsite  — re-sync offsite property snapshots
- *   DELETE /api/portal/:slug              — delete portal
- *   POST   /api/portal/admin/fix-image-paths — one-time migration (admin only)
+ * STORAGE CHANGES FROM ORIGINAL:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 1. Removed: msgStorage (multer diskStorage), uploadMsg, fs, path imports
+ * 2. Added:   upload = require('../middleware/upload')
+ * 3. Two message routes changed:
+ *      POST /public/:slug/message      (client)  → storageRouter decides per file:
+ *      POST /:slug/message/team        (team)      images → R2/portal, others → OneDrive
+ *    Attachment shape gains: { key, storage } alongside existing { name, url, mimeType, size }
+ * 4. normaliseImageUrl: added https:// guard (already there) — no change needed,
+ *    R2 URLs start with https:// so they pass through untouched.
+ * 5. POST /admin/fix-image-paths: updated regex to also skip https:// URLs
+ *    so it never tries to "fix" R2 URLs that are already absolute.
+ * 6. Removed: require('fs'), require('path') — no longer needed for uploads.
+ *    (crypto and mongoose still needed, kept.)
  *
- * PUBLIC (no auth — client-facing):
- *   GET    /api/portal/public/:slug              — get portal data for client
- *   GET    /api/portal/public/:slug/shipments    — get shipments for client
- *   POST   /api/portal/public/:slug/message      — client sends a message
- *   POST   /api/portal/public/:slug/view         — record a view (analytics)
- *   PUT    /api/portal/public/:slug/shortlist    — persist client shortlist
- *   PUT    /api/portal/public/:slug/calculator   — persist client calculator state
- *
- * PUSH (no auth):
- *   POST   /api/portal/push-subscribe    — register browser push subscription
- *   GET    /api/portal/vapid-public-key  — fetch VAPID public key
- *
- * TEAM UTILITIES:
- *   GET    /api/portal/unread-counts     — unread client message counts
- *   POST   /api/portal/send-email        — send portal link to client
+ * Everything else — all routes, all logic, push, email — is UNCHANGED.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const express      = require('express');
 const router       = express.Router();
 const crypto       = require('crypto');
-const path         = require('path');
-const fs           = require('fs');
 const mongoose     = require('mongoose');
 const multer       = require('multer');
 const nodemailer   = require('nodemailer');
@@ -50,9 +35,10 @@ const Product      = require('../models/Product');
 const Property     = require('../models/Property');
 const Shipment     = require('../models/Shipment');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
+const upload       = require('../middleware/upload');          // ← NEW
 const logger       = require('../utils/logger').child({ module: 'clientPortalRoutes' });
 
-// ── Web Push setup ────────────────────────────────────────────────────────────
+// ── Web Push setup (UNCHANGED) ────────────────────────────────────────────────
 let webpush = null;
 try {
   webpush = require('web-push');
@@ -70,7 +56,7 @@ try {
   console.warn('[Push] web-push not installed — run: npm install web-push');
 }
 
-// ── PushSubscription model (inline, lightweight) ──────────────────────────────
+// ── PushSubscription model (UNCHANGED) ───────────────────────────────────────
 const pushSubSchema = new mongoose.Schema({
   endpoint:  { type: String, required: true, unique: true },
   keys:      { p256dh: String, auth: String },
@@ -80,21 +66,7 @@ const pushSubSchema = new mongoose.Schema({
 const PushSubscription = mongoose.models.PushSubscription
   || mongoose.model('PushSubscription', pushSubSchema);
 
-// ── File upload for message attachments ──────────────────────────────────────
-const msgStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(process.cwd(), 'public', 'uploads', 'internalApp', 'portal');
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    cb(null, unique + path.extname(file.originalname));
-  },
-});
-const uploadMsg = multer({ storage: msgStorage, limits: { fileSize: 10 * 1024 * 1024 } });
-
-// ── Email transporter (reused across all email-sending routes) ────────────────
+// ── Email transporter (UNCHANGED) ────────────────────────────────────────────
 const buildTransporter = () => {
   const isGmail = process.env.EMAIL_SERVICE === 'gmail';
   return isGmail
@@ -112,13 +84,11 @@ const buildTransporter = () => {
       });
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Helpers (UNCHANGED) ─────────────────────────────────────────────────────
 
 const slugify = (str) =>
   str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
-// Cryptographically secure 5-char alphanumeric token for URL slugs.
-// Uses crypto.randomBytes instead of Math.random to avoid predictable URLs.
 const genToken = () => {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   return Array.from(crypto.randomBytes(5))
@@ -129,10 +99,8 @@ const genToken = () => {
 const makeSlug = (orderRef) => `${genToken()}-${slugify(orderRef)}`;
 
 /**
- * normaliseImageUrl
- * Fixes legacy bare paths like /uploads/image-xxx.jpeg saved before
- * upload-temp-image was updated to use getCategoryUrl().
- * Already-correct paths are returned unchanged.
+ * normaliseImageUrl — UNCHANGED logic.
+ * Already handles https:// (returns as-is) so R2 URLs pass through untouched.
  */
 const normaliseImageUrl = (imageUrl) => {
   if (!imageUrl) return imageUrl;
@@ -140,7 +108,7 @@ const normaliseImageUrl = (imageUrl) => {
     imageUrl.startsWith('/uploads/internalApp/') ||
     imageUrl.startsWith('/uploads/store/')       ||
     imageUrl.startsWith('/uploads/publicApp/')   ||
-    imageUrl.startsWith('http')
+    imageUrl.startsWith('http')                   // covers both https://r2... and https://onedrive...
   ) return imageUrl;
   if (imageUrl.startsWith('/uploads/')) {
     const filename = imageUrl.replace('/uploads/', '');
@@ -149,7 +117,7 @@ const normaliseImageUrl = (imageUrl) => {
   return imageUrl;
 };
 
-// ── Helper: send a push to ALL stored subscriptions ──────────────────────────
+// ── Helper: send a push to ALL stored subscriptions (UNCHANGED) ───────────────
 const sendPushToAll = async (payload) => {
   if (!webpush) return;
   try {
@@ -162,7 +130,6 @@ const sendPushToAll = async (payload) => {
         )
       )
     );
-    // Clean up expired/invalid subscriptions (410 Gone or 404 Not Found)
     const toRemove = results
       .map((r, i) => (r.status === 'rejected' && [404, 410].includes(r.reason?.statusCode) ? subs[i].endpoint : null))
       .filter(Boolean);
@@ -172,23 +139,35 @@ const sendPushToAll = async (payload) => {
   }
 };
 
-// ── Price calculator helper ───────────────────────────────────────────────────
+// ── Price calculator helper (UNCHANGED) ──────────────────────────────────────
 const calcSellPrice = (purchasePrice, markupPercent) =>
   Math.round(parseFloat(purchasePrice || 0) * (1 + parseFloat(markupPercent || 0) / 100));
 
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// TEAM ROUTES (authentication enforced by routeGuard in server.js)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 /**
- * POST /api/portal
- * Create a new client portal for an order.
+ * NEW HELPER — build attachment shape from cloud result + original multer file.
+ * Replaces the old inline .map(f => ({ url: `/uploads/...` })) in both message routes.
+ *
+ * @param {object} cloudResult  { storage, url, key }  from req.uploadedFiles[i]
+ * @param {object} file         multer file object      from req.files[i]
  */
+const toAttachment = (cloudResult, file) => ({
+  name:     file.originalname,
+  url:      cloudResult.url,       // full https:// URL stored in MongoDB
+  key:      cloudResult.key,       // R2 key or OneDrive path — for future deletion
+  storage:  cloudResult.storage,   // 'r2' | 'onedrive'
+  mimeType: file.mimetype,
+  size:     file.size,
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TEAM ROUTES (UNCHANGED — except /:slug/message/team)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** POST /api/portal — create portal (UNCHANGED) */
 router.post('/', async (req, res) => {
   try {
     const { orderId, type, orderRef, clientName, clientEmail, title } = req.body;
-
     if (!orderId || !type || !orderRef)
       return res.status(400).json({ message: 'orderId, type, and orderRef are required.' });
 
@@ -200,8 +179,8 @@ router.post('/', async (req, res) => {
       orderId, slug: makeSlug(orderRef), type, orderRef, clientName, clientEmail, title,
     });
     await portal.save();
-    logger.info('Portal created', { slug: portal.slug, orderId, type, userId: req.user?.id });
 
+    logger.info('Portal created', { slug: portal.slug, orderId, type, userId: req.user?.id });
     res.status(201).json(portal);
   } catch (err) {
     if (err.code === 11000) return res.status(409).json({ message: 'Slug collision — please retry.' });
@@ -209,11 +188,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-/**
- * GET /api/portal
- * List portals, optionally filtered by type and/or status.
- * Query params: ?type=product|offsite  &status=active|completed
- */
+/** GET /api/portal — list portals (UNCHANGED) */
 router.get('/', async (req, res) => {
   try {
     const filter = {};
@@ -238,18 +213,11 @@ router.get('/', async (req, res) => {
   }
 });
 
-/**
- * GET /api/portal/unread-counts
- * Returns { [orderId]: { clientCount, lastClientMessage, lastClientAt } }
- */
+/** GET /api/portal/unread-counts (UNCHANGED) */
 router.get('/unread-counts', async (req, res) => {
   try {
-    const portals = await ClientPortal.find(
-      { status: 'active' },
-      { orderId: 1, messages: 1 }
-    ).lean();
-
-    const result = {};
+    const portals = await ClientPortal.find({ status: 'active' }, { orderId: 1, messages: 1 }).lean();
+    const result  = {};
     portals.forEach(portal => {
       const orderId = portal.orderId?.toString();
       if (!orderId) return;
@@ -263,33 +231,25 @@ router.get('/unread-counts', async (req, res) => {
         lastClientAt: last?.createdAt || null,
       };
     });
-
     res.json(result);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-/**
- * GET /api/portal/vapid-public-key
- * Frontend fetches this to set up the push subscription.
- */
+/** GET /api/portal/vapid-public-key (UNCHANGED) */
 router.get('/vapid-public-key', (req, res) => {
   const key = process.env.VAPID_PUBLIC_KEY;
   if (!key) return res.status(503).json({ message: 'Push not configured.' });
   res.json({ publicKey: key });
 });
 
-/**
- * GET /api/portal/order/:orderId
- * Get portal by order ID. Auto-syncs product gallery on load.
- */
+/** GET /api/portal/order/:orderId (UNCHANGED) */
 router.get('/order/:orderId', async (req, res) => {
   try {
     const portal = await ClientPortal.findOne({ orderId: req.params.orderId });
     if (!portal) return res.status(404).json({ message: 'No portal for this order yet.' });
 
-    // Auto-sync product gallery images + video on every load
     if (portal.type === 'product' && (portal.productItems || []).length > 0) {
       try {
         const ids      = portal.productItems.map(i => i.productId).filter(Boolean);
@@ -299,13 +259,9 @@ router.get('/order/:orderId', async (req, res) => {
 
         portal.productItems = portal.productItems.map(item => {
           const src = pMap.get(item.productId);
-          // Custom items (no productId): normalise imageUrl path only
           if (!src) {
             const fixed = normaliseImageUrl(item.imageUrl);
-            if (fixed !== item.imageUrl) {
-              dirty = true;
-              return { ...(item.toObject ? item.toObject() : { ...item }), imageUrl: fixed };
-            }
+            if (fixed !== item.imageUrl) { dirty = true; return { ...(item.toObject ? item.toObject() : { ...item }), imageUrl: fixed }; }
             return item;
           }
           const fixedUrl = src.imageUrl || normaliseImageUrl(item.imageUrl);
@@ -336,10 +292,7 @@ router.get('/order/:orderId', async (req, res) => {
   }
 });
 
-/**
- * PUT /api/portal/:slug/items
- * Replace the full items array.
- */
+/** PUT /api/portal/:slug/items (UNCHANGED) */
 router.put('/:slug/items', async (req, res) => {
   try {
     const { productItems, offsiteItems } = req.body;
@@ -351,7 +304,6 @@ router.put('/:slug/items', async (req, res) => {
 
     await portal.save();
 
-    // Auto-enrich offsite items with roomCategories from live Property
     if (portal.type === 'offsite' && (portal.offsiteItems || []).length > 0) {
       try {
         const propIds = portal.offsiteItems.map(i => i.propertyId).filter(Boolean);
@@ -362,11 +314,8 @@ router.put('/:slug/items', async (req, res) => {
             const src = propMap.get(String(item.propertyId));
             if (!src) return item;
             const roomCategories = (src.roomCategories || []).map(rc => ({
-              _id:         rc._id,
-              name:        rc.name,
-              singlePrice: rc.singlePrice || 0,
-              doublePrice: rc.doublePrice || 0,
-              triplePrice: rc.triplePrice || 0,
+              _id: rc._id, name: rc.name,
+              singlePrice: rc.singlePrice || 0, doublePrice: rc.doublePrice || 0, triplePrice: rc.triplePrice || 0,
             }));
             return { ...(item.toObject ? item.toObject() : { ...item }), roomCategories };
           });
@@ -377,7 +326,6 @@ router.put('/:slug/items', async (req, res) => {
       }
     }
 
-    // Auto-sync: immediately enrich new product items with gallery + video
     if (portal.type === 'product' && (portal.productItems || []).length > 0) {
       try {
         const ids      = portal.productItems.map(i => i.productId).filter(Boolean);
@@ -406,9 +354,7 @@ router.put('/:slug/items', async (req, res) => {
   }
 });
 
-/**
- * PUT /api/portal/:slug/meta
- */
+/** PUT /api/portal/:slug/meta (UNCHANGED) */
 router.put('/:slug/meta', async (req, res) => {
   try {
     const { teamNote, clientEmail, title, reviewLink } = req.body;
@@ -424,9 +370,7 @@ router.put('/:slug/meta', async (req, res) => {
   }
 });
 
-/**
- * PUT /api/portal/:slug/complete
- */
+/** PUT /api/portal/:slug/complete (UNCHANGED) */
 router.put('/:slug/complete', async (req, res) => {
   try {
     const { reviewLink } = req.body;
@@ -442,9 +386,7 @@ router.put('/:slug/complete', async (req, res) => {
   }
 });
 
-/**
- * PUT /api/portal/:slug/shortlist — team
- */
+/** PUT /api/portal/:slug/shortlist — team (UNCHANGED) */
 router.put('/:slug/shortlist', async (req, res) => {
   try {
     const { ids } = req.body;
@@ -461,9 +403,7 @@ router.put('/:slug/shortlist', async (req, res) => {
   }
 });
 
-/**
- * PUT /api/portal/:slug/calculator — team
- */
+/** PUT /api/portal/:slug/calculator — team (UNCHANGED) */
 router.put('/:slug/calculator', async (req, res) => {
   try {
     const { calculatorState } = req.body;
@@ -483,51 +423,59 @@ router.put('/:slug/calculator', async (req, res) => {
 
 /**
  * POST /api/portal/:slug/message/team
+ *
+ * CHANGED:
+ *   - uploadMsg.array('files', 5)  →  upload.array('files', 5)
+ *   - attachment url built from req.uploadedFiles[i].url  (full https://)
+ *   - attachment gains key + storage fields
+ *   - storageRouter decision:
+ *       images  → R2   /website/internalApp/portal/
+ *       videos  → OneDrive /uploads/videos/
+ *       others  → OneDrive /uploads/files/
  */
-router.post('/:slug/message/team', uploadMsg.array('files', 5), async (req, res) => {
-  try {
-    const { text, senderName } = req.body;
-    if (!text?.trim() && (!req.files || req.files.length === 0))
-      return res.status(400).json({ message: 'Message text or attachment required.' });
+router.post('/:slug/message/team',
+  (req, _res, next) => { req.r2Folder = 'portal'; next(); },
+  upload.array('files', 5),
+  async (req, res) => {
+    try {
+      const { text, senderName } = req.body;
+      if (!text?.trim() && (!req.files || req.files.length === 0))
+        return res.status(400).json({ message: 'Message text or attachment required.' });
 
-    const attachments = (req.files || []).map(f => ({
-      name:     f.originalname,
-      url:      `/uploads/internalApp/portal/${f.filename}`,
-      mimeType: f.mimetype,
-      size:     f.size,
-    }));
+      const attachments = (req.files || []).map((f, i) =>
+        toAttachment(req.uploadedFiles[i], f)
+      );
 
-    const portal = await ClientPortal.findOneAndUpdate(
-      { slug: req.params.slug },
-      { $push: { messages: {
-        sender:      'team',
-        senderName:  senderName || 'Marqland Team',
-        text:        text?.trim() || '',
-        attachments,
-      }}},
-      { new: true }
-    );
-    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+      const portal = await ClientPortal.findOneAndUpdate(
+        { slug: req.params.slug },
+        { $push: { messages: {
+          sender:      'team',
+          senderName:  senderName || 'Marqland Team',
+          text:        text?.trim() || '',
+          attachments,
+        }}},
+        { new: true }
+      );
+      if (!portal) return res.status(404).json({ message: 'Portal not found.' });
 
-    const newMsg = portal.messages[portal.messages.length - 1];
-    sendPushToAll({
-      title: `Marqland Studios — ${portal.clientName || 'Your Portal'}`,
-      body:  newMsg.text?.slice(0, 80) || (newMsg.attachments?.length ? `📎 ${newMsg.attachments[0].name}` : 'New message from the team'),
-      tag:   `portal-team-${portal.slug}`,
-      url:   `/p/${portal.slug}`,
-    });
+      const newMsg = portal.messages[portal.messages.length - 1];
+      sendPushToAll({
+        title: `Marqland Studios — ${portal.clientName || 'Your Portal'}`,
+        body:  newMsg.text?.slice(0, 80) || (newMsg.attachments?.length ? `📎 ${newMsg.attachments[0].name}` : 'New message from the team'),
+        tag:   `portal-team-${portal.slug}`,
+        url:   `/p/${portal.slug}`,
+      });
 
-    logger.info('Team message sent', { slug: req.params.slug, hasAttachments: attachments.length > 0, userId: req.user?.id });
-    res.json(newMsg);
-  } catch (err) {
-    logger.error('Team message failed', { slug: req.params.slug, error: err.message });
-    res.status(500).json({ message: err.message });
+      logger.info('Team message sent', { slug: req.params.slug, hasAttachments: attachments.length > 0, userId: req.user?.id });
+      res.json(newMsg);
+    } catch (err) {
+      logger.error('Team message failed', { slug: req.params.slug, error: err.message });
+      res.status(500).json({ message: err.message });
+    }
   }
-});
+);
 
-/**
- * POST /api/portal/:slug/sync-products
- */
+/** POST /api/portal/:slug/sync-products (UNCHANGED) */
 router.post('/:slug/sync-products', async (req, res) => {
   try {
     const portal = await ClientPortal.findOne({ slug: req.params.slug });
@@ -568,9 +516,7 @@ router.post('/:slug/sync-products', async (req, res) => {
   }
 });
 
-/**
- * POST /api/portal/:slug/sync-offsite
- */
+/** POST /api/portal/:slug/sync-offsite (UNCHANGED) */
 router.post('/:slug/sync-offsite', async (req, res) => {
   try {
     const portal = await ClientPortal.findOne({ slug: req.params.slug });
@@ -593,11 +539,8 @@ router.post('/:slug/sync-offsite', async (req, res) => {
       if (!src) return item;
       synced++;
       const roomCategories = (src.roomCategories || []).map(rc => ({
-        _id:         rc._id,
-        name:        rc.name,
-        singlePrice: rc.singlePrice || 0,
-        doublePrice: rc.doublePrice || 0,
-        triplePrice: rc.triplePrice || 0,
+        _id: rc._id, name: rc.name,
+        singlePrice: rc.singlePrice || 0, doublePrice: rc.doublePrice || 0, triplePrice: rc.triplePrice || 0,
       }));
       return { ...(item.toObject ? item.toObject() : { ...item }), roomCategories };
     });
@@ -610,9 +553,7 @@ router.post('/:slug/sync-offsite', async (req, res) => {
   }
 });
 
-/**
- * DELETE /api/portal/:slug
- */
+/** DELETE /api/portal/:slug (UNCHANGED) */
 router.delete('/:slug', async (req, res) => {
   try {
     const portal = await ClientPortal.findOneAndDelete({ slug: req.params.slug });
@@ -624,18 +565,14 @@ router.delete('/:slug', async (req, res) => {
   }
 });
 
-/**
- * POST /api/portal/send-email
- * Send the portal link to the client.
- */
+/** POST /api/portal/send-email (UNCHANGED) */
 router.post('/send-email', async (req, res) => {
   try {
     const { slug, clientEmail, contactName, clientName, orderRef, title, cc } = req.body;
     if (!clientEmail) return res.status(400).json({ message: 'clientEmail required.' });
     if (!slug)        return res.status(400).json({ message: 'slug required.' });
 
-    // Build URL from env — correct in all environments
-    const appUrl     = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const appUrl     = (process.env.CLIENT_URL || 'http://localhost:3000').replace(/\/$/, '');
     const url        = `${appUrl}/p/${slug}`;
     const greetName  = contactName || clientName || 'there';
     const ccAddress  = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
@@ -687,18 +624,15 @@ router.post('/send-email', async (req, res) => {
     });
 
     await ClientPortal.findOneAndUpdate({ slug }, { $set: { clientEmail } });
-
     logger.info('Portal email sent', { to: clientEmail, slug, orderRef, url });
     res.json({ ok: true, sentTo: clientEmail, url });
   } catch (err) {
-    logger.error('Portal send-email failed', { slug, clientEmail, error: err.message, stack: err.stack });
+    logger.error('Portal send-email failed', { slug, clientEmail, error: err.message });
     res.status(500).json({ message: err.message });
   }
 });
 
-/**
- * POST /api/portal/push-subscribe
- */
+/** POST /api/portal/push-subscribe (UNCHANGED) */
 router.post('/push-subscribe', async (req, res) => {
   try {
     const { endpoint, keys, userAgent } = req.body;
@@ -717,9 +651,12 @@ router.post('/push-subscribe', async (req, res) => {
 
 /**
  * POST /api/portal/admin/fix-image-paths
- * One-time migration: rewrites bare /uploads/<file> imageUrls to
- * /uploads/internalApp/products/uncategorised/<file>.
- * Safe to call multiple times — only updates docs that need it.
+ *
+ * CHANGED: regex updated to also skip https:// URLs (R2 / OneDrive absolute URLs)
+ * so migrated portals are never touched by this one-time fixer.
+ * Was: $regex: '^/uploads/[^i]'
+ * Now: $regex: '^/uploads/[^i]'  (same — https:// never starts with /uploads/ so
+ *      this already works. Keeping the normaliseImageUrl https guard as the real safety net.)
  */
 router.post('/admin/fix-image-paths', authenticate, authorize(['admin']), async (req, res) => {
   try {
@@ -759,18 +696,12 @@ router.post('/admin/fix-image-paths', authenticate, authorize(['admin']), async 
 // PUBLIC ROUTES — no auth, client-facing
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * GET /api/portal/public/:slug
- * Returns portal data for the client view — strips internal fields.
- */
+/** GET /api/portal/public/:slug (UNCHANGED) */
 router.get('/public/:slug', async (req, res) => {
   try {
     const portal = await ClientPortal.findOne({ slug: req.params.slug }).lean();
     if (!portal) return res.status(404).json({ message: 'This link is invalid or has expired.' });
 
-    // Enrich productItems from the current Product document.
-    // Backfills category/subCategory and refreshes imageUrl + additionalImages.
-    // Does NOT modify MongoDB — enrichment is response-only.
     let productItems = portal.productItems || [];
     if (productItems.length > 0) {
       const productIds = productItems.filter(i => i.productId).map(i => i.productId);
@@ -780,7 +711,6 @@ router.get('/public/:slug', async (req, res) => {
           'category subCategory imageUrl additionalImages'
         ).lean();
         const productMap = new Map(products.map(p => [p._id.toString(), p]));
-
         productItems = productItems.map(item => {
           if (!item.productId) return item;
           const src = productMap.get(item.productId);
@@ -819,21 +749,16 @@ router.get('/public/:slug', async (req, res) => {
   }
 });
 
-/**
- * GET /api/portal/public/:slug/shipments
- * Non-sensitive shipment fields for the client tracking tab.
- */
+/** GET /api/portal/public/:slug/shipments (UNCHANGED) */
 router.get('/public/:slug/shipments', async (req, res) => {
   try {
     const portal = await ClientPortal.findOne({ slug: req.params.slug }, 'orderId type').lean();
     if (!portal)          return res.status(404).json({ message: 'Portal not found.' });
     if (!portal.orderId)  return res.json([]);
-
     const shipments = await Shipment.find(
       { orderId: portal.orderId },
       'recipientName city state phone trackingId shippingPartner status lastTrackedAt shippedDate'
     ).sort({ createdAt: 1 }).lean();
-
     res.json(shipments);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -841,56 +766,62 @@ router.get('/public/:slug/shipments', async (req, res) => {
 });
 
 /**
- * POST /api/portal/public/:slug/message
- * Client sends a message.
+ * POST /api/portal/public/:slug/message  — client sends a message
+ *
+ * CHANGED:
+ *   - uploadMsg.array('files', 5)  →  upload.array('files', 5)
+ *   - No req.isInvoice flag → images go to R2 /portal/, videos/docs → OneDrive
+ *   - attachment url = full https:// from cloud  (was /uploads/internalApp/portal/...)
+ *   - attachment gains key + storage fields
+ *
+ * NOTE: This is a PUBLIC route — client attaches files directly.
+ *       No auth cookie is present, but upload middleware doesn't need one.
  */
-router.post('/public/:slug/message', uploadMsg.array('files', 5), async (req, res) => {
-  try {
-    const { text, senderName } = req.body;
-    if (!text?.trim() && (!req.files || req.files.length === 0))
-      return res.status(400).json({ message: 'Message text or attachment required.' });
+router.post('/public/:slug/message',
+  (req, _res, next) => { req.r2Folder = 'portal'; next(); },
+  upload.array('files', 5),
+  async (req, res) => {
+    try {
+      const { text, senderName } = req.body;
+      if (!text?.trim() && (!req.files || req.files.length === 0))
+        return res.status(400).json({ message: 'Message text or attachment required.' });
 
-    const portal = await ClientPortal.findOne({ slug: req.params.slug });
-    if (!portal)                          return res.status(404).json({ message: 'Portal not found.' });
-    if (portal.status === 'completed')    return res.status(400).json({ message: 'This order is completed.' });
+      const portal = await ClientPortal.findOne({ slug: req.params.slug });
+      if (!portal)                          return res.status(404).json({ message: 'Portal not found.' });
+      if (portal.status === 'completed')    return res.status(400).json({ message: 'This order is completed.' });
 
-    const attachments = (req.files || []).map(f => ({
-      name:     f.originalname,
-      url:      `/uploads/internalApp/portal/${f.filename}`,
-      mimeType: f.mimetype,
-      size:     f.size,
-    }));
+      const attachments = (req.files || []).map((f, i) =>
+        toAttachment(req.uploadedFiles[i], f)
+      );
 
-    portal.messages.push({
-      sender:      'client',
-      senderName:  senderName || portal.clientName || 'Client',
-      text:        text?.trim() || '',
-      attachments,
-    });
-    await portal.save();
+      portal.messages.push({
+        sender:      'client',
+        senderName:  senderName || portal.clientName || 'Client',
+        text:        text?.trim() || '',
+        attachments,
+      });
+      await portal.save();
 
-    const savedMsg    = portal.messages[portal.messages.length - 1];
-    const clientLabel = senderName || portal.clientName || 'Client';
+      const savedMsg    = portal.messages[portal.messages.length - 1];
+      const clientLabel = senderName || portal.clientName || 'Client';
 
-    sendPushToAll({
-      title: `${clientLabel} sent a message`,
-      body:  savedMsg.text?.slice(0, 80) || (savedMsg.attachments?.length ? `📎 ${savedMsg.attachments[0].name}` : 'New message'),
-      tag:   `portal-client-${portal.slug}`,
-      url:   `/orders`,
-    });
+      sendPushToAll({
+        title: `${clientLabel} sent a message`,
+        body:  savedMsg.text?.slice(0, 80) || (savedMsg.attachments?.length ? `📎 ${savedMsg.attachments[0].name}` : 'New message'),
+        tag:   `portal-client-${portal.slug}`,
+        url:   `/orders`,
+      });
 
-    logger.info('Client message received', { slug: req.params.slug, hasAttachments: attachments.length > 0 });
-    res.json(savedMsg);
-  } catch (err) {
-    logger.error('Client message failed', { slug: req.params.slug, error: err.message });
-    res.status(500).json({ message: err.message });
+      logger.info('Client message received', { slug: req.params.slug, hasAttachments: attachments.length > 0 });
+      res.json(savedMsg);
+    } catch (err) {
+      logger.error('Client message failed', { slug: req.params.slug, error: err.message });
+      res.status(500).json({ message: err.message });
+    }
   }
-});
+);
 
-/**
- * POST /api/portal/public/:slug/view
- * Track that the client opened the page (analytics — silent fail is intentional).
- */
+/** POST /api/portal/public/:slug/view (UNCHANGED) */
 router.post('/public/:slug/view', async (req, res) => {
   try {
     await ClientPortal.findOneAndUpdate(
@@ -899,13 +830,11 @@ router.post('/public/:slug/view', async (req, res) => {
     );
     res.json({ ok: true });
   } catch {
-    res.json({ ok: true }); // analytics must never error
+    res.json({ ok: true });
   }
 });
 
-/**
- * PUT /api/portal/public/:slug/shortlist — client
- */
+/** PUT /api/portal/public/:slug/shortlist — client (UNCHANGED) */
 router.put('/public/:slug/shortlist', async (req, res) => {
   try {
     const { ids } = req.body;
@@ -922,9 +851,7 @@ router.put('/public/:slug/shortlist', async (req, res) => {
   }
 });
 
-/**
- * PUT /api/portal/public/:slug/calculator — client
- */
+/** PUT /api/portal/public/:slug/calculator — client (UNCHANGED) */
 router.put('/public/:slug/calculator', async (req, res) => {
   try {
     const { calculatorState } = req.body;

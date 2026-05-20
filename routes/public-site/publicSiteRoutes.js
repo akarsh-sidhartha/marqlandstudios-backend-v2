@@ -1,49 +1,48 @@
 'use strict';
 /**
  * backend/routes/public-site/publicSiteRoutes.js
- *
  * Mounted at /api/public-site in server.js.
  *
- * ─── WHO CALLS WHAT ──────────────────────────────────────────────────────────
+ * STORAGE CHANGES FROM ORIGINAL:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ALL image uploads now go to Cloudflare R2 instead of local disk.
  *
- * PUBLIC (marqlandstudios.com visitors — no auth):
- *   GET  /store     — categories + testimonials for the homepage
- *   POST /inquiry   — contact form submission
+ * R2 layout (maps 1:1 to old disk layout):
+ *   OLD: uploads/publicApp/category/{CategoryName}/{filename}
+ *   NEW: website/publicApp/category/{CategoryName}/{filename}   → R2
  *
- * ADMIN (marqlandstudios-admin, Marqland team only — JWT + admin role):
- *   The routes below manage the *content* displayed on the public site.
- *   They are operated by the team from the admin panel, not by website visitors.
- *   POST   /categories
- *   DELETE /categories/:catId
- *   PUT    /categories/:catId/cover/:imgId
- *   POST   /categories/:catId/subcategories
- *   PUT    /categories/:catId/subcategories/:subId
- *   DELETE /categories/:catId/subcategories/:subId
- *   POST   /upload/:catId
- *   POST   /upload/:catId/sub/:subId
- *   DELETE /images/:catId/:imgId
- *   DELETE /images/:catId/sub/:subId/:imgId
- *   PUT    /reorder/:catId
- *   PUT    /reorder/:catId/sub/:subId
- *   POST   /testimonials
- *   PUT    /testimonials/:id
- *   DELETE /testimonials/:id
- *   GET    /inquiries
- *   DELETE /inquiries/:id
- *   PATCH  /inquiries/:id/read
+ *   OLD: uploads/publicApp/category/{Cat}/{Sub}/{filename}
+ *   NEW: website/publicApp/category/{Cat}/{Sub}/{filename}      → R2
  *
- * ─── UPLOAD STRUCTURE ────────────────────────────────────────────────────────
- *   Category images:    uploads/publicApp/category/<CategoryName>/filename
- *   Subcategory images: uploads/publicApp/category/<CategoryName>/<SubName>/filename
- *   Testimonial photos: uploads/publicApp/testimonials/filename
+ *   OLD: uploads/publicApp/testimonials/{filename}
+ *   NEW: website/publicApp/testimonials/{filename}              → R2
+ *
+ * What was removed:
+ *   - path, fs imports
+ *   - PUBLIC_APP_BASE, getCategoryDir, getSubcategoryDir, getTestimonialDir
+ *   - getCategoryUrl, getSubcategoryUrl, getTestimonialUrl
+ *   - saveImageBuffer (sharp → toFile)  →  saveImageToR2 (sharp → uploadBuffer)
+ *   - deleteFileSafe (fs.unlinkSync)    →  deleteFromR2(key)
+ *   - deleteDirSafe (fs.rmSync)         →  deleteR2Prefix(prefix) [batch delete]
+ *   - Two inline multer instances       →  single shared imageUpload (memoryStorage)
+ *
+ * StoreCategory imageSchema:
+ *   url field now stores full R2 https:// URL (was /uploads/... relative path)
+ *   filename field now stores R2 key (was local filename)  — used for deletion
+ *
+ * Testimonial imageUrl now stores full R2 https:// URL.
+ *
+ * All other routes (categories CRUD, subcategories CRUD, reorder,
+ * inquiries, GET /store, POST /inquiry) — UNCHANGED.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const express  = require('express');
 const router   = express.Router();
 const multer   = require('multer');
-const path     = require('path');
-const fs       = require('fs');
 const sharp    = require('sharp');
+const { v4: uuidv4 } = require('uuid');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 
 const StoreCategory = require('../../models/public-site/StoreCategory');
 const Testimonial   = require('../../models/public-site/Testimonial');
@@ -51,124 +50,111 @@ const PublicInquiry = require('../../models/public-site/PublicInquiry');
 const { authenticate, authorize } = require('../../middleware/authMiddleware');
 const logger = require('../../utils/logger').child({ module: 'publicSiteRoutes' });
 
-// ─── Auth guard ───────────────────────────────────────────────────────────────
-// Declared at the top so it can safely be referenced by any route below.
-// Without this, registering a route before this line would silently skip auth.
 const adminOnly = [authenticate, authorize(['admin'])];
 
-// ─── Upload directory helpers ─────────────────────────────────────────────────
-const PUBLIC_APP_BASE = path.join(process.cwd(), 'public', 'uploads', 'publicApp');
+// ─── R2 client (reuses same credentials as r2Service.js) ─────────────────────
+const r2 = new S3Client({
+  region:   'auto',
+  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId:     process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+});
+const BUCKET     = () => process.env.R2_BUCKET_NAME;
+const PUBLIC_URL = () => (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '');
 
-/** Sanitise a user-provided name to a safe folder component. */
+// ── Sanitise names for use in R2 key paths ────────────────────────────────────
 const safeName = (name) =>
   (name || 'uncategorised').trim()
     .replace(/[^a-zA-Z0-9_\- ]/g, '')
     .replace(/\s+/g, '_');
 
-const getCategoryDir = (categoryName) => {
-  const dir = path.join(PUBLIC_APP_BASE, 'category', safeName(categoryName));
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-};
+// ── R2 key builders (mirror old disk folder structure) ────────────────────────
+const categoryKey    = (catName, filename) =>
+  `website/publicApp/category/${safeName(catName)}/${filename}`;
+const subcategoryKey = (catName, subName, filename) =>
+  `website/publicApp/category/${safeName(catName)}/${safeName(subName)}/${filename}`;
+const testimonialKey = (filename) =>
+  `website/publicApp/testimonials/${filename}`;
 
-const getSubcategoryDir = (categoryName, subcategoryName) => {
-  const dir = path.join(
-    PUBLIC_APP_BASE, 'category', safeName(categoryName), safeName(subcategoryName)
-  );
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-};
-
-const getTestimonialDir = () => {
-  const dir = path.join(PUBLIC_APP_BASE, 'testimonials');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-};
-
-const getCategoryUrl    = (cat, filename) =>
-  `/uploads/publicApp/category/${safeName(cat)}/${filename}`;
-const getSubcategoryUrl = (cat, sub, filename) =>
-  `/uploads/publicApp/category/${safeName(cat)}/${safeName(sub)}/${filename}`;
-const getTestimonialUrl = (filename) =>
-  `/uploads/publicApp/testimonials/${filename}`;
-
-// ─── Disk helpers ─────────────────────────────────────────────────────────────
+// ── Core R2 helpers ───────────────────────────────────────────────────────────
 
 /**
- * Delete a single file from disk. Logs a warning on failure — never throws.
- * @param {string} urlPath  e.g. '/uploads/publicApp/category/Gifts/img.webp'
+ * Process buffer with sharp → WebP, upload to R2, return { key, url, aspectRatio }.
  */
-const deleteFileSafe = (urlPath) => {
-  const fp = path.join(process.cwd(), 'public', urlPath);
+const saveImageToR2 = async (buffer, r2Key) => {
+  const [aspectRatio, webpBuffer] = await Promise.all([
+    // Aspect ratio — needed for the bento grid layout
+    sharp(buffer).metadata().then(({ width, height }) =>
+      width && height ? width / height : null
+    ).catch(() => null),
+    // WebP conversion — matches original saveImageBuffer quality
+    sharp(buffer)
+      .resize(2000, 2000, { fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 88 })
+      .toBuffer(),
+  ]);
+
+  await r2.send(new PutObjectCommand({
+    Bucket:      BUCKET(),
+    Key:         r2Key,
+    Body:        webpBuffer,
+    ContentType: 'image/webp',
+  }));
+
+  return { key: r2Key, url: `${PUBLIC_URL()}/${r2Key}`, aspectRatio };
+};
+
+/**
+ * Delete a single R2 object by key. Non-fatal.
+ * @param {string} key  R2 key stored in img.filename (or img.url won't work for deletion)
+ */
+const deleteFromR2 = async (key) => {
+  if (!key) return;
   try {
-    if (fs.existsSync(fp)) fs.unlinkSync(fp);
+    await r2.send(new DeleteObjectCommand({ Bucket: BUCKET(), Key: key }));
+    logger.debug('R2 file deleted', { key });
   } catch (e) {
-    logger.warn('File delete failed', { path: fp, error: e.message });
+    logger.warn('R2 file delete failed (non-fatal)', { key, error: e.message });
   }
 };
 
 /**
- * Recursively delete a directory. Uses fs.rmSync (not the deprecated rmdirSync)
- * so it works even if the directory still has files in it (e.g. a previous
- * individual file delete silently failed). Never throws.
+ * Delete all R2 objects under a key prefix (equivalent to deleting a folder).
+ * Used when an entire category or subcategory is deleted.
+ * Non-fatal — logs on failure.
  */
-const deleteDirSafe = (dirPath) => {
+const deleteR2Prefix = async (prefix) => {
+  if (!prefix) return;
   try {
-    if (fs.existsSync(dirPath)) fs.rmSync(dirPath, { recursive: true, force: true });
+    let continuationToken;
+    do {
+      const listRes = await r2.send(new ListObjectsV2Command({
+        Bucket:            BUCKET(),
+        Prefix:            prefix,
+        ContinuationToken: continuationToken,
+      }));
+      const keys = (listRes.Contents || []).map(o => o.Key).filter(Boolean);
+      await Promise.all(keys.map(k => deleteFromR2(k)));
+      continuationToken = listRes.IsTruncated ? listRes.NextContinuationToken : undefined;
+    } while (continuationToken);
+    logger.debug('R2 prefix deleted', { prefix });
   } catch (e) {
-    logger.warn('Directory delete failed', { path: dirPath, error: e.message });
+    logger.warn('R2 prefix delete failed (non-fatal)', { prefix, error: e.message });
   }
 };
 
-// ─── Multer — memory storage ──────────────────────────────────────────────────
-// Memory storage is necessary because the on-disk destination depends on the
-// category/subcategory name, which must be resolved from MongoDB after multer
-// parses the request. Files are written to disk manually in each route handler.
-const upload = multer({
+// ─── multer — memory only, images only ───────────────────────────────────────
+// Single instance replaces the two inline ones (upload + testimonialUpload).
+const imageUpload = multer({
   storage:    multer.memoryStorage(),
-  limits:     { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  limits:     { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) =>
     file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only image files allowed.')),
 });
 
-const testimonialUpload = multer({
-  storage:    multer.memoryStorage(),
-  limits:     { fileSize: 5 * 1024 * 1024 }, // 5 MB
-  fileFilter: (req, file, cb) =>
-    file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only image files allowed.')),
-});
-
-// ─── Image processing helpers ─────────────────────────────────────────────────
-
-/** Normalise any input format to WebP and write to destDir. Returns filename. */
-const saveImageBuffer = async (buffer, destDir) => {
-  const filename = `${Date.now()}-${Math.round(Math.random() * 1e6)}.webp`;
-  await sharp(buffer)
-    .resize(2000, 2000, { fit: 'inside', withoutEnlargement: true })
-    .webp({ quality: 88 })
-    .toFile(path.join(destDir, filename));
-  return filename;
-};
-
-/** Extract width/height aspect ratio. Returns null if sharp can't read the buffer. */
-const getAspectRatio = async (buffer) => {
-  try {
-    const { width, height } = await sharp(buffer).metadata();
-    if (width && height) return width / height;
-  } catch { /* non-critical */ }
-  return null;
-};
-
-// ─── Public store payload ─────────────────────────────────────────────────────
-/**
- * Returns only what the public site homepage needs: categories + testimonials.
- *
- * IMPORTANT: Inquiries are intentionally excluded from this payload.
- * GET /store is unauthenticated and open to the internet — including inquiries
- * would expose the name, email, phone, and message of every person who has
- * submitted the contact form. Inquiries are served separately via
- * GET /inquiries which is admin-only.
- */
+// ─── Public store payload (UNCHANGED) ────────────────────────────────────────
 const buildStorePayload = async () => {
   const [categories, testimonials] = await Promise.all([
     StoreCategory.find().sort({ order: 1, createdAt: 1 }).lean(),
@@ -182,7 +168,7 @@ const buildStorePayload = async () => {
       .sort((a, b) => a.order - b.order)
       .map(img => ({
         id:          img._id.toString(),
-        url:         img.url,
+        url:         img.url,         // now R2 https:// URL — frontend uses directly
         isCover:     img.isCover,
         aspectRatio: img.aspectRatio,
       })),
@@ -207,7 +193,7 @@ const buildStorePayload = async () => {
     company:  t.company,
     role:     t.role,
     feedback: t.text,
-    content:  t.text,  // dual-key: some frontend components use one, some the other
+    content:  t.text,
     imageUrl: t.imageUrl || '',
   }));
 
@@ -216,21 +202,13 @@ const buildStorePayload = async () => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PUBLIC ROUTES — no auth, called by marqlandstudios.com visitors
+// PUBLIC ROUTES — UNCHANGED
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * GET /store
- * Full homepage data: categories (with images) + testimonials.
- * Inquiries are NOT included — see buildStorePayload comment above.
- */
 router.get('/store', async (req, res) => {
   try {
     const payload = await buildStorePayload();
-    logger.debug('Public store payload served', {
-      categories:   payload.categories.length,
-      testimonials: payload.testimonials.length,
-    });
+    logger.debug('Public store payload served', { categories: payload.categories.length, testimonials: payload.testimonials.length });
     res.json(payload);
   } catch (err) {
     logger.error('Failed to build store payload', { error: err.message, stack: err.stack });
@@ -238,16 +216,11 @@ router.get('/store', async (req, res) => {
   }
 });
 
-/**
- * POST /inquiry
- * Contact form submission from marqlandstudios.com.
- */
 router.post('/inquiry', async (req, res) => {
   try {
     const { name, company, email, phone, message, hearAbout } = req.body;
     if (!name?.trim() || !email?.trim())
       return res.status(400).json({ message: 'Name and email are required.' });
-
     const inq = await PublicInquiry.create({ name, company, email, phone, message, hearAbout });
     logger.info('Public inquiry received', { inquiryId: inq._id, email });
     res.status(201).json({ message: 'Inquiry received.', id: inq._id });
@@ -259,17 +232,13 @@ router.post('/inquiry', async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ADMIN ROUTES — JWT required, admin role only
-// Called by marqlandstudios-admin to manage the public site content.
+// ADMIN ROUTES — categories + subcategories CRUD — UNCHANGED logic
 // ═══════════════════════════════════════════════════════════════════════════════
-
-// ── Categories ────────────────────────────────────────────────────────────────
 
 router.post('/categories', adminOnly, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: 'Name required.' });
-
     const count = await StoreCategory.countDocuments();
     const cat   = await StoreCategory.create({ name: name.trim(), order: count });
     logger.info('Category created', { categoryId: cat._id, name: cat.name, userId: req.user?.id });
@@ -280,20 +249,18 @@ router.post('/categories', adminOnly, async (req, res) => {
   }
 });
 
+/**
+ * DELETE /categories/:catId
+ * CHANGED: deleteFileSafe + deleteDirSafe → deleteR2Prefix
+ * Deletes all R2 objects under website/publicApp/category/{catName}/
+ */
 router.delete('/categories/:catId', adminOnly, async (req, res) => {
   try {
     const cat = await StoreCategory.findByIdAndDelete(req.params.catId);
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
 
-    // Delete all image files first, then the entire folder.
-    // Using deleteDirSafe (fs.rmSync recursive) instead of the old rmdirSync —
-    // rmdirSync throws if the directory is not empty, which happens whenever a
-    // previous individual deleteFileSafe silently failed.
-    (cat.images || []).forEach(img => deleteFileSafe(img.url));
-    (cat.subcategories || []).forEach(sub =>
-      (sub.images || []).forEach(img => deleteFileSafe(img.url))
-    );
-    deleteDirSafe(getCategoryDir(cat.name));
+    // Delete entire category folder from R2 in one prefix sweep
+    await deleteR2Prefix(`website/publicApp/category/${safeName(cat.name)}/`);
 
     logger.info('Category deleted', { categoryId: req.params.catId, name: cat.name, userId: req.user?.id });
     res.json({ message: 'Deleted.' });
@@ -307,10 +274,8 @@ router.put('/categories/:catId/cover/:imgId', adminOnly, async (req, res) => {
   try {
     const cat = await StoreCategory.findById(req.params.catId);
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
-
     cat.images.forEach(img => { img.isCover = (img._id.toString() === req.params.imgId); });
     await cat.save();
-
     logger.info('Category cover updated', { categoryId: req.params.catId, imgId: req.params.imgId, userId: req.user?.id });
     res.json({ message: 'Cover updated.' });
   } catch (err) {
@@ -319,19 +284,14 @@ router.put('/categories/:catId/cover/:imgId', adminOnly, async (req, res) => {
   }
 });
 
-// ── Subcategories ─────────────────────────────────────────────────────────────
-
 router.post('/categories/:catId/subcategories', adminOnly, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name?.trim()) return res.status(400).json({ message: 'Name required.' });
-
     const cat = await StoreCategory.findById(req.params.catId);
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
-
     cat.subcategories.push({ name: name.trim(), order: cat.subcategories.length });
     await cat.save();
-
     const newSub = cat.subcategories[cat.subcategories.length - 1];
     logger.info('Subcategory created', { categoryId: req.params.catId, subId: newSub._id, name: newSub.name, userId: req.user?.id });
     res.status(201).json({ id: newSub._id, name: newSub.name });
@@ -347,18 +307,20 @@ router.put('/categories/:catId/subcategories/:subId', adminOnly, async (req, res
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
     const sub = cat.subcategories.id(req.params.subId);
     if (!sub) return res.status(404).json({ message: 'Subcategory not found.' });
-
     sub.name = req.body.name?.trim() || sub.name;
     await cat.save();
-
-    logger.info('Subcategory renamed', { categoryId: req.params.catId, subId: req.params.subId, name: sub.name, userId: req.user?.id });
+    logger.info('Subcategory renamed', { categoryId: req.params.catId, subId: req.params.subId, userId: req.user?.id });
     res.json({ id: sub._id, name: sub.name });
   } catch (err) {
-    logger.error('Subcategory rename failed', { categoryId: req.params.catId, subId: req.params.subId, error: err.message, stack: err.stack });
+    logger.error('Subcategory rename failed', { categoryId: req.params.catId, error: err.message, stack: err.stack });
     res.status(500).json({ message: err.message });
   }
 });
 
+/**
+ * DELETE /categories/:catId/subcategories/:subId
+ * CHANGED: deleteFileSafe loop → deleteR2Prefix for the subcategory folder
+ */
 router.delete('/categories/:catId/subcategories/:subId', adminOnly, async (req, res) => {
   try {
     const cat = await StoreCategory.findById(req.params.catId);
@@ -366,46 +328,48 @@ router.delete('/categories/:catId/subcategories/:subId', adminOnly, async (req, 
     const sub = cat.subcategories.id(req.params.subId);
     if (!sub) return res.status(404).json({ message: 'Subcategory not found.' });
 
-    (sub.images || []).forEach(img => deleteFileSafe(img.url));
+    await deleteR2Prefix(`website/publicApp/category/${safeName(cat.name)}/${safeName(sub.name)}/`);
     sub.deleteOne();
     await cat.save();
 
     logger.info('Subcategory deleted', { categoryId: req.params.catId, subId: req.params.subId, userId: req.user?.id });
     res.json({ message: 'Deleted.' });
   } catch (err) {
-    logger.error('Subcategory delete failed', { categoryId: req.params.catId, subId: req.params.subId, error: err.message, stack: err.stack });
+    logger.error('Subcategory delete failed', { categoryId: req.params.catId, error: err.message, stack: err.stack });
     res.status(500).json({ message: err.message });
   }
 });
 
-// ── Image upload ──────────────────────────────────────────────────────────────
 
-router.post('/upload/:catId', adminOnly, upload.array('image', 20), async (req, res) => {
+// ═══════════════════════════════════════════════════════════════════════════════
+// IMAGE UPLOAD — category + subcategory
+// CHANGED: saveImageBuffer(buffer, destDir) → saveImageToR2(buffer, r2Key)
+//          url stored is now full R2 https:// URL
+//          filename stored is now R2 key (used for deletion)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.post('/upload/:catId', adminOnly, imageUpload.array('image', 20), async (req, res) => {
   try {
     if (!req.files?.length) return res.status(400).json({ message: 'No files uploaded.' });
 
     const cat = await StoreCategory.findById(req.params.catId);
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
 
-    const destDir   = getCategoryDir(cat.name);
     const baseOrder = cat.images?.length || 0;
 
-    // getAspectRatio and saveImageBuffer both read the same buffer — run them
-    // in parallel per file to halve the sharp processing time on bulk uploads.
     const newImages = await Promise.all(req.files.map(async (file, i) => {
-      const [aspectRatio, filename] = await Promise.all([
-        getAspectRatio(file.buffer),
-        saveImageBuffer(file.buffer, destDir),
-      ]);
-      return { url: getCategoryUrl(cat.name, filename), filename, isCover: false, aspectRatio, order: baseOrder + i };
+      const filename = `${uuidv4()}.webp`;
+      const r2Key    = categoryKey(cat.name, filename);
+      const { url, aspectRatio } = await saveImageToR2(file.buffer, r2Key);
+      return { url, filename: r2Key, isCover: false, aspectRatio, order: baseOrder + i };
+      //             ↑ full R2 URL   ↑ key stored in filename field — used for deletion
     }));
 
     cat.images.push(...newImages);
-    // Auto-set first image as cover if no cover exists yet
     if (!cat.images.some(img => img.isCover)) cat.images[0].isCover = true;
     await cat.save();
 
-    logger.info('Category images uploaded', { categoryId: req.params.catId, name: cat.name, count: req.files.length, userId: req.user?.id });
+    logger.info('Category images uploaded to R2', { categoryId: req.params.catId, name: cat.name, count: req.files.length, userId: req.user?.id });
     res.json({ message: `${req.files.length} image(s) uploaded.` });
   } catch (err) {
     logger.error('Category image upload failed', { categoryId: req.params.catId, error: err.message, stack: err.stack });
@@ -413,7 +377,7 @@ router.post('/upload/:catId', adminOnly, upload.array('image', 20), async (req, 
   }
 });
 
-router.post('/upload/:catId/sub/:subId', adminOnly, upload.array('image', 20), async (req, res) => {
+router.post('/upload/:catId/sub/:subId', adminOnly, imageUpload.array('image', 20), async (req, res) => {
   try {
     if (!req.files?.length) return res.status(400).json({ message: 'No files uploaded.' });
 
@@ -422,21 +386,19 @@ router.post('/upload/:catId/sub/:subId', adminOnly, upload.array('image', 20), a
     const sub = cat.subcategories.id(req.params.subId);
     if (!sub) return res.status(404).json({ message: 'Subcategory not found.' });
 
-    const destDir   = getSubcategoryDir(cat.name, sub.name);
     const baseOrder = sub.images?.length || 0;
 
     const newImages = await Promise.all(req.files.map(async (file, i) => {
-      const [aspectRatio, filename] = await Promise.all([
-        getAspectRatio(file.buffer),
-        saveImageBuffer(file.buffer, destDir),
-      ]);
-      return { url: getSubcategoryUrl(cat.name, sub.name, filename), filename, isCover: false, aspectRatio, order: baseOrder + i };
+      const filename = `${uuidv4()}.webp`;
+      const r2Key    = subcategoryKey(cat.name, sub.name, filename);
+      const { url, aspectRatio } = await saveImageToR2(file.buffer, r2Key);
+      return { url, filename: r2Key, isCover: false, aspectRatio, order: baseOrder + i };
     }));
 
     sub.images.push(...newImages);
     await cat.save();
 
-    logger.info('Subcategory images uploaded', { categoryId: req.params.catId, subId: req.params.subId, subName: sub.name, count: req.files.length, userId: req.user?.id });
+    logger.info('Subcategory images uploaded to R2', { categoryId: req.params.catId, subId: req.params.subId, count: req.files.length, userId: req.user?.id });
     res.json({ message: `${req.files.length} image(s) uploaded.` });
   } catch (err) {
     logger.error('Subcategory image upload failed', { categoryId: req.params.catId, subId: req.params.subId, error: err.message, stack: err.stack });
@@ -444,7 +406,12 @@ router.post('/upload/:catId/sub/:subId', adminOnly, upload.array('image', 20), a
   }
 });
 
-// ── Image deletion ────────────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// IMAGE DELETION
+// CHANGED: deleteFileSafe(img.url) → deleteFromR2(img.filename)
+//          img.filename now stores the R2 key, img.url is the public URL
+// ═══════════════════════════════════════════════════════════════════════════════
 
 router.delete('/images/:catId/:imgId', adminOnly, async (req, res) => {
   try {
@@ -453,11 +420,11 @@ router.delete('/images/:catId/:imgId', adminOnly, async (req, res) => {
     const img = cat.images.id(req.params.imgId);
     if (!img) return res.status(404).json({ message: 'Image not found.' });
 
-    deleteFileSafe(img.url);
+    await deleteFromR2(img.filename); // img.filename = R2 key
     img.deleteOne();
     await cat.save();
 
-    logger.info('Category image deleted', { categoryId: req.params.catId, imgId: req.params.imgId, userId: req.user?.id });
+    logger.info('Category image deleted from R2', { categoryId: req.params.catId, imgId: req.params.imgId, userId: req.user?.id });
     res.json({ message: 'Image deleted.' });
   } catch (err) {
     logger.error('Category image delete failed', { categoryId: req.params.catId, imgId: req.params.imgId, error: err.message, stack: err.stack });
@@ -474,11 +441,11 @@ router.delete('/images/:catId/sub/:subId/:imgId', adminOnly, async (req, res) =>
     const img = sub.images.id(req.params.imgId);
     if (!img) return res.status(404).json({ message: 'Image not found.' });
 
-    deleteFileSafe(img.url);
+    await deleteFromR2(img.filename); // img.filename = R2 key
     img.deleteOne();
     await cat.save();
 
-    logger.info('Subcategory image deleted', { categoryId: req.params.catId, subId: req.params.subId, imgId: req.params.imgId, userId: req.user?.id });
+    logger.info('Subcategory image deleted from R2', { categoryId: req.params.catId, subId: req.params.subId, imgId: req.params.imgId, userId: req.user?.id });
     res.json({ message: 'Image deleted.' });
   } catch (err) {
     logger.error('Subcategory image delete failed', { categoryId: req.params.catId, subId: req.params.subId, error: err.message, stack: err.stack });
@@ -486,22 +453,19 @@ router.delete('/images/:catId/sub/:subId/:imgId', adminOnly, async (req, res) =>
   }
 });
 
-// ── Image reorder ─────────────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REORDER — UNCHANGED
+// ═══════════════════════════════════════════════════════════════════════════════
 
 router.put('/reorder/:catId', adminOnly, async (req, res) => {
   try {
     const { imageIds } = req.body;
     if (!Array.isArray(imageIds)) return res.status(400).json({ message: 'imageIds array required.' });
-
     const cat = await StoreCategory.findById(req.params.catId);
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
-
-    imageIds.forEach((id, idx) => {
-      const img = cat.images.id(id);
-      if (img) img.order = idx;
-    });
+    imageIds.forEach((id, idx) => { const img = cat.images.id(id); if (img) img.order = idx; });
     await cat.save();
-
     logger.info('Category images reordered', { categoryId: req.params.catId, count: imageIds.length, userId: req.user?.id });
     res.json({ message: 'Order updated.' });
   } catch (err) {
@@ -514,18 +478,12 @@ router.put('/reorder/:catId/sub/:subId', adminOnly, async (req, res) => {
   try {
     const { imageIds } = req.body;
     if (!Array.isArray(imageIds)) return res.status(400).json({ message: 'imageIds array required.' });
-
     const cat = await StoreCategory.findById(req.params.catId);
     if (!cat) return res.status(404).json({ message: 'Category not found.' });
     const sub = cat.subcategories.id(req.params.subId);
     if (!sub) return res.status(404).json({ message: 'Subcategory not found.' });
-
-    imageIds.forEach((id, idx) => {
-      const img = sub.images.id(id);
-      if (img) img.order = idx;
-    });
+    imageIds.forEach((id, idx) => { const img = sub.images.id(id); if (img) img.order = idx; });
     await cat.save();
-
     logger.info('Subcategory images reordered', { categoryId: req.params.catId, subId: req.params.subId, count: imageIds.length, userId: req.user?.id });
     res.json({ message: 'Order updated.' });
   } catch (err) {
@@ -534,22 +492,30 @@ router.put('/reorder/:catId/sub/:subId', adminOnly, async (req, res) => {
   }
 });
 
-// ── Testimonials ──────────────────────────────────────────────────────────────
 
-router.post('/testimonials', adminOnly, testimonialUpload.single('photo'), async (req, res) => {
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTIMONIALS
+// CHANGED: saveImageBuffer → saveImageToR2, deleteFileSafe → deleteFromR2
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.post('/testimonials', adminOnly, imageUpload.single('photo'), async (req, res) => {
   try {
     const { author, company, role, text } = req.body;
     if (!author?.trim() || !text?.trim())
       return res.status(400).json({ message: 'Author and text are required.' });
 
     let imageUrl = '';
+    let imageKey = '';
     if (req.file) {
-      const filename = await saveImageBuffer(req.file.buffer, getTestimonialDir());
-      imageUrl = getTestimonialUrl(filename);
+      const filename  = `${uuidv4()}.webp`;
+      const r2Key     = testimonialKey(filename);
+      const r2Result  = await saveImageToR2(req.file.buffer, r2Key);
+      imageUrl = r2Result.url;
+      imageKey = r2Key;
     }
 
     const count = await Testimonial.countDocuments();
-    const t = await Testimonial.create({ author, company, role, text, imageUrl, order: count });
+    const t = await Testimonial.create({ author, company, role, text, imageUrl, imageKey, order: count });
 
     logger.info('Testimonial created', { testimonialId: t._id, author, userId: req.user?.id });
     res.status(201).json({ id: t._id, author: t.author, company: t.company, role: t.role, text: t.text, imageUrl: t.imageUrl });
@@ -559,22 +525,26 @@ router.post('/testimonials', adminOnly, testimonialUpload.single('photo'), async
   }
 });
 
-router.put('/testimonials/:id', adminOnly, testimonialUpload.single('photo'), async (req, res) => {
+router.put('/testimonials/:id', adminOnly, imageUpload.single('photo'), async (req, res) => {
   try {
     const existing = await Testimonial.findById(req.params.id);
     if (!existing) return res.status(404).json({ message: 'Testimonial not found.' });
 
     let imageUrl = existing.imageUrl;
+    let imageKey = existing.imageKey || '';
     if (req.file) {
-      if (existing.imageUrl) deleteFileSafe(existing.imageUrl);
-      const filename = await saveImageBuffer(req.file.buffer, getTestimonialDir());
-      imageUrl = getTestimonialUrl(filename);
+      if (imageKey) await deleteFromR2(imageKey);  // delete old R2 image
+      const filename  = `${uuidv4()}.webp`;
+      const r2Key     = testimonialKey(filename);
+      const r2Result  = await saveImageToR2(req.file.buffer, r2Key);
+      imageUrl = r2Result.url;
+      imageKey = r2Key;
     }
 
     const { author, company, role, text } = req.body;
     const t = await Testimonial.findByIdAndUpdate(
       req.params.id,
-      { author, company, role, text, imageUrl },
+      { author, company, role, text, imageUrl, imageKey },
       { new: true }
     );
 
@@ -590,7 +560,7 @@ router.delete('/testimonials/:id', adminOnly, async (req, res) => {
   try {
     const t = await Testimonial.findByIdAndDelete(req.params.id);
     if (!t) return res.status(404).json({ message: 'Testimonial not found.' });
-    if (t.imageUrl) deleteFileSafe(t.imageUrl);
+    if (t.imageKey) await deleteFromR2(t.imageKey);
     logger.info('Testimonial deleted', { testimonialId: req.params.id, userId: req.user?.id });
     res.json({ message: 'Deleted.' });
   } catch (err) {
@@ -599,7 +569,10 @@ router.delete('/testimonials/:id', adminOnly, async (req, res) => {
   }
 });
 
-// ── Inquiries (admin only) ────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INQUIRIES — UNCHANGED
+// ═══════════════════════════════════════════════════════════════════════════════
 
 router.get('/inquiries', adminOnly, async (req, res) => {
   try {

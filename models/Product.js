@@ -17,7 +17,8 @@ const productSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
-
+  imageKey: { type: String, default: '' },   // R2 key: "website/internalApp/products/uuid.webp"
+  additionalImageKeys: { type: [String], default: [] }, // R2 keys for gallery images
   // ── NEW: Product video ────────────────────────────────────────────────────
   // YouTube URL, brand video URL, or any embeddable link.
   // Shown as an embedded player in the client portal view.

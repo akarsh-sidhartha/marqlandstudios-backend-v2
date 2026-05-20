@@ -1,15 +1,13 @@
 'use strict';
 /**
- * backend/services/msGraphService.js
+ * services/msGraphService.js
  * ─────────────────────────────────────────────────────────────────────────────
  * Centralised Microsoft Graph API service.
- * Replaces duplicate auth + OneDrive + Outlook code spread across:
- *   - routes/orderInquiry.js
- *   - routes/paymentTrackerRoutes.js
- *   - routes/invoiceRoute.js
  *
- * KEY IMPROVEMENT: Token is cached in memory and reused until 5 min before
- * expiry — avoids a fresh OAuth round-trip on every single API call.
+ * CHANGES FROM ORIGINAL:
+ *   - Added `uploadSingleFileBuffer()` — accepts a Buffer directly (for multer
+ *     memoryStorage) instead of base64. Used by the new upload middleware.
+ *   - All existing exports (uploadSingleFile, uploadFiles, etc.) unchanged.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -19,12 +17,8 @@ const logger = require('../utils/logger').child({ module: 'msGraphService' });
 // ── Token cache ───────────────────────────────────────────────────────────────
 let _cachedToken    = null;
 let _tokenExpiresAt = 0;
-const TOKEN_BUFFER  = 5 * 60 * 1000; // refresh 5 min before expiry
+const TOKEN_BUFFER  = 5 * 60 * 1000;
 
-/**
- * Get a valid MS Graph access token.
- * Returns cached token if still valid, otherwise fetches a fresh one.
- */
 const getAccessToken = async () => {
   if (_cachedToken && Date.now() < _tokenExpiresAt - TOKEN_BUFFER) {
     return _cachedToken;
@@ -130,6 +124,7 @@ const buildOrderFolderHierarchy = async (orderData) => {
 /**
  * Upload an array of files to a OneDrive folder.
  * Each file: { name, base64, type }
+ * (Existing — unchanged, used by orderInquiry routes)
  */
 const uploadFiles = async (folderId, files) => {
   if (!files?.length) return;
@@ -162,9 +157,9 @@ const deleteFile = async (itemId) => {
  * e.g. ['Orders', 'Acme Corp', '24-25', 'Ravi', 'INQ-24-25-001']
  */
 const deleteFolderByPath = async (segments) => {
-  const path = segments.map(encodeURIComponent).join('/');
+  const p = segments.map(encodeURIComponent).join('/');
   try {
-    await axios.delete(`${driveBase()}/root:/${path}`, { headers: await authHeaders() });
+    await axios.delete(`${driveBase()}/root:/${p}`, { headers: await authHeaders() });
   } catch (err) {
     if (err.response?.status !== 404) throw err;
     logger.warn('OneDrive folder not found — skipping deletion', { path: segments.join('/') });
@@ -198,11 +193,61 @@ const getFolderIdFromUrl = async (url) => {
   }
 };
 
+/**
+ * Upload a single file (base64) to OneDrive — EXISTING, unchanged.
+ * Used by invoice, PI attachment, and payment screenshot uploads.
+ *
+ * @param {string[]} folderPath - e.g. ['Invoices', '25-26', 'May']
+ * @param {string}   filename
+ * @param {string}   base64     raw base64 or data URI
+ * @param {string}   mimeType
+ * @returns {Promise<{ fileId, webUrl }>}
+ */
+const uploadSingleFile = async (folderPath, filename, base64, mimeType) => {
+  const h = await authHeaders();
+  let parentId = 'root';
+  for (const segment of folderPath) {
+    parentId = await getOrCreateFolder(parentId, segment);
+  }
+  const pure = base64.includes(',') ? base64.split(',')[1] : base64;
+  const r = await axios.put(
+    `${driveBase()}/items/${parentId}:/${filename}:/content`,
+    Buffer.from(pure, 'base64'),
+    { headers: { ...h, 'Content-Type': mimeType || 'application/octet-stream' } }
+  );
+  return { fileId: r.data.id, webUrl: r.data.webUrl };
+};
+
+/**
+ * NEW — Upload a Buffer directly to OneDrive.
+ * Used by the upload middleware for multer memoryStorage files.
+ * Replaces the base64 conversion step — cleaner and faster.
+ *
+ * @param {string[]} folderPath  e.g. ['Invoices', '25-26', 'May']
+ * @param {string}   filename    e.g. 'uuid.pdf'
+ * @param {Buffer}   buffer      file buffer from req.file.buffer
+ * @param {string}   mimeType    e.g. 'application/pdf'
+ * @returns {Promise<{ fileId: string, webUrl: string }>}
+ */
+const uploadSingleFileBuffer = async (folderPath, filename, buffer, mimeType) => {
+  const h = await authHeaders();
+  let parentId = 'root';
+  for (const segment of folderPath) {
+    parentId = await getOrCreateFolder(parentId, segment);
+  }
+  const r = await axios.put(
+    `${driveBase()}/items/${parentId}:/${filename}:/content`,
+    buffer,
+    { headers: { ...h, 'Content-Type': mimeType || 'application/octet-stream' } }
+  );
+  logger.debug('OneDrive buffer upload complete', { path: folderPath.join('/'), filename });
+  return { fileId: r.data.id, webUrl: r.data.webUrl };
+};
+
 // ── Outlook ───────────────────────────────────────────────────────────────────
 
 /**
  * Scan all org mailboxes for attachments (images/PDFs) since sinceISO.
- * Returns array of { contentBytes, contentType, subject, fromEmail, userEmail }
  */
 const scanMailboxesForAttachments = async (sinceISO) => {
   const h       = await authHeaders();
@@ -243,44 +288,9 @@ const scanMailboxesForAttachments = async (sinceISO) => {
   return results;
 };
 
-/**
- * Upload a single file (base64) to OneDrive and return { fileId, webUrl }.
- * Used by invoice, PI attachment, and payment screenshot uploads.
- *
- * @param {string[]} folderPath - e.g. ['Invoices', '25-26', 'May']
- * @param {string}   filename   - e.g. 'invoice-123.pdf'
- * @param {string}   base64     - raw base64 or data URI
- * @param {string}   mimeType
- */
-const uploadSingleFile = async (folderPath, filename, base64, mimeType) => {
-  const h = await authHeaders();
-
-  // Build folder hierarchy
-  let parentId = 'root';
-  for (const segment of folderPath) {
-    parentId = await getOrCreateFolder(parentId, segment);
-  }
-
-  // Strip data URI prefix if present
-  const pure = base64.includes(',') ? base64.split(',')[1] : base64;
-
-  // Upload file
-  const r = await axios.put(
-    `${driveBase()}/items/${parentId}:/${filename}:/content`,
-    Buffer.from(pure, 'base64'),
-    { headers: { ...h, 'Content-Type': mimeType || 'application/octet-stream' } }
-  );
-
-  return {
-    fileId: r.data.id,
-    webUrl: r.data.webUrl,
-  };
-};
-
 /** Get the month name from a date */
-const getMonthName = (date) => {
-  return new Date(date).toLocaleString('default', { month: 'long' });
-};
+const getMonthName = (date) =>
+  new Date(date).toLocaleString('default', { month: 'long' });
 
 module.exports = {
   getAccessToken,
@@ -288,6 +298,7 @@ module.exports = {
   buildOrderFolderHierarchy,
   uploadFiles,
   uploadSingleFile,
+  uploadSingleFileBuffer,          // NEW
   listFolderContents,
   deleteFile,
   deleteFolderByPath,
