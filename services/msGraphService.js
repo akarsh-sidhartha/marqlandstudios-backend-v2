@@ -7,7 +7,11 @@
  * CHANGES FROM ORIGINAL:
  *   - Added `uploadSingleFileBuffer()` — accepts a Buffer directly (for multer
  *     memoryStorage) instead of base64. Used by the new upload middleware.
- *   - All existing exports (uploadSingleFile, uploadFiles, etc.) unchanged.
+ *   - `buildOrderFolderHierarchy`: root folder is no longer hardcoded as 'Orders'.
+ *     It now reads orderData.folderRoot → env ONEDRIVE_ORDER_ROOT → 'website/orders'.
+ *     Old path: root/Orders/{client}/{FY}/{contact}/{ref}
+ *     New path: root/website/orders/{client}/{FY}/{contact}/{ref}
+ *   - All other existing exports unchanged.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -98,7 +102,17 @@ const getOrCreateFolder = async (parentId, folderName) => {
 
 /**
  * Build the Orders folder hierarchy and return { folderId, folderUrl }.
- * Path: root/Orders/{client}/{FY}/{contact}/{refNumber}
+ *
+ * Path (new):  root/website/orders/{client}/{FY}/{contact}/{refNumber}
+ * Path (old):  root/Orders/{client}/{FY}/{contact}/{refNumber}
+ *
+ * The root is controlled by orderData.folderRoot (passed from orderInquiryRoute
+ * via ONEDRIVE_ORDER_ROOT env var).  Defaults to 'website/orders' so this
+ * function is correct with no caller changes if the env var is set.
+ * Fallback chain: orderData.folderRoot → env ONEDRIVE_ORDER_ROOT → 'website/orders'
+ *
+ * folderRoot can be a slash-separated string ('website/orders') — each segment
+ * becomes its own folder level, created with getOrCreateFolder.
  */
 const buildOrderFolderHierarchy = async (orderData) => {
   const h = await authHeaders();
@@ -107,8 +121,19 @@ const buildOrderFolderHierarchy = async (orderData) => {
   const contactFolder = (orderData.orderPlacedBy || 'General').trim();
   const refFolder     = (orderData.refNumber     || 'No-Ref').replace(/\//g, '-').trim();
 
+  // Resolve root: caller > env > hard default
+  const rootPath = (
+    orderData.folderRoot ||
+    process.env.ONEDRIVE_ORDER_ROOT ||
+    'website/orders'
+  ).replace(/^\/|\/$/g, '');  // strip any leading/trailing slashes
+
+  // Walk down from 'root', creating each segment of the root path first,
+  // then the per-order segments beneath it.
   let parentId = 'root';
-  parentId = await getOrCreateFolder(parentId, 'Orders');
+  for (const segment of rootPath.split('/')) {
+    parentId = await getOrCreateFolder(parentId, segment);
+  }
   parentId = await getOrCreateFolder(parentId, clientFolder);
   parentId = await getOrCreateFolder(parentId, fyFolder);
   parentId = await getOrCreateFolder(parentId, contactFolder);

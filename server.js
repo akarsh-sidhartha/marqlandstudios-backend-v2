@@ -14,7 +14,8 @@ const cron = require('node-cron');
 const app = express();
 
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-
+const legacyPortalRedirect = require('./middleware/legacyPortalRedirect');// delete this over a period of time.
+app.use(legacyPortalRedirect); // must be before all other app.use() calls // delete this over a period of time.
 const logger = require('./utils/logger').child({ module: 'server' });
 const { attachRequestId, requestLogger } = require('./middleware/requestLogger');
 const whatsappService = require('./services/whatsappService');
