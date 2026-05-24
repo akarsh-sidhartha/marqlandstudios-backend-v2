@@ -147,6 +147,8 @@ app.use(activityLogger);
 // clients can load their portal, record views, send messages, etc.
 app.use('/api', (req, res, next) => {
   const PUBLIC_PATHS = [
+    '/public-site/store',       // ← public website store data
+    '/public-site/inquiry',     // ← public contact form POST
     '/portal/public/',      // GET portal data, POST view, POST message, PUT shortlist/calculator, GET shipments
     '/portal/push-subscribe',  // register browser push subscription (no auth needed)
     '/portal/vapid-public-key', // fetch VAPID key for push setup (no auth needed)
@@ -278,7 +280,7 @@ process.on('uncaughtException', (err) => {
 // ─── Server Startup ───────────────────────────────────────────────────────────
 //const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 3000;
-app.listen(PORT,() => {
+app.listen(PORT, () => {
   console.log('SERVER STARTED ON PORT', PORT); // raw console, not logger
   logger.info('API server started', {
     env: IS_PRODUCTION ? 'production' : 'development',
