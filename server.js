@@ -240,7 +240,7 @@ app.use((req, res, next) => {
   });
   res.status(404).json({ error: 'Not found. This is an API server.' });
 });
-
+console.log('Log 30 file');
 // ─── Global Error Handler ─────────────────────────────────────────────────────
 app.use((err, req, res, next) => {
   logger.error('Unhandled error reached global handler', {
@@ -255,14 +255,14 @@ app.use((err, req, res, next) => {
     error: IS_PRODUCTION ? 'Internal Server Error' : err.message,
   });
 });
-
+console.log('Log 31 file');
 // ─── Background Schedulers ────────────────────────────────────────────────────
 startScheduler();         // Trending products — 02:00 IST daily
 startTrackingScheduler(); // Shipment tracking — every 2 hours
-
+console.log('Log 32 file');
 // ─── CRON: Daily Outlook + WhatsApp Sync ─────────────────────────────────────
 const cronLogger = logger.child({ module: 'cron' });
-
+console.log('Log 33 file');
 cron.schedule('0 10 * * *', async () => {
   cronLogger.info('Daily sync task started');
   let stats = { outlookStatus: 'Pending', invoicesCount: 0 };
@@ -297,7 +297,7 @@ cron.schedule('0 10 * * *', async () => {
   scheduled: true,
   timezone: 'Asia/Kolkata',
 });
-
+console.log('Log 34 file');
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 const shutdown = async (signal) => {
   logger.info(`${signal} received — shutting down gracefully`);
@@ -309,10 +309,10 @@ const shutdown = async (signal) => {
   }
   process.exit(0);
 };
-
+console.log('Log 35 file');
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
-
+console.log('Log 36 file');
 // Catch any unhandled rejections/exceptions so they always appear in logs
 process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled promise rejection', {
@@ -324,7 +324,7 @@ process.on('uncaughtException', (err) => {
   logger.error('Uncaught exception — process will exit', { error: err.message, stack: err.stack });
   process.exit(1);
 });
-
+console.log('Log 37 file');
 // ─── Server Startup ───────────────────────────────────────────────────────────
 //const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 5000;
