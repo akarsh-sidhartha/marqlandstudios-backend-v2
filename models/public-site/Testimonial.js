@@ -12,6 +12,7 @@ const testimonialSchema = new mongoose.Schema({
   role:     { type: String, default: '' },
   text:     { type: String, required: true },   // the testimonial body
   imageUrl: { type: String, default: '' },       // person photo — /uploads/publicApp/testimonials/filename
+  imageKey: { type: String, default: '' }, 
   order:    { type: Number, default: 0 },
 }, {
   timestamps: true,

@@ -2,6 +2,8 @@ const dotenv = require('dotenv');
 //dotenv.config({ override: false });
 // ⚠ MUST call before any require that reads process.env
 dotenv.config();
+console.log('CLIENT_URL from env:', process.env.CLIENT_URL); // ← add temporarily
+console.log('CLIENT_URL from env:', process.env.ADMIN_URL); // ← add temporarily
 
 
 const express = require('express');
