@@ -327,8 +327,7 @@ process.on('uncaughtException', (err) => {
 console.log('Log 37 file');
 // ─── Server Startup ───────────────────────────────────────────────────────────
 //const HOST = '0.0.0.0';
-//const PORT = process.env.PORT || 5000;
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 3000;
 console.log('Log 38 file');
 logger.info("after setting the port");
 console.log('PORT value is:', JSON.stringify(process.env.PORT));
