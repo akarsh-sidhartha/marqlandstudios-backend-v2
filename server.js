@@ -129,21 +129,29 @@ console.log('clientPortalRoutes loaded OK');
 
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
+console.log('Log 1 file');
 
 // Public — no auth
 app.use('/uploads/store', express.static(path.join(__dirname, 'public', 'uploads', 'store')));
+console.log('Log 2 file');
 app.use('/uploads/publicApp', express.static(path.join(__dirname, 'public', 'uploads', 'publicApp')));
+console.log('Log 3 file');
 app.use('/uploads/internalApp/products', express.static(path.join(__dirname, 'public', 'uploads', 'internalApp', 'products')));
+console.log('Log 4 file');
 app.use('/uploads/internalApp/portal', express.static(path.join(__dirname, 'public', 'uploads', 'internalApp', 'portal')));
+console.log('Log 5 file');
 
 // Protected — httpOnly cookie required
 app.use('/uploads/internalApp', authenticateStatic, express.static(path.join(__dirname, 'public', 'uploads', 'internalApp')));
+console.log('Log 6 file');
 
 // Fallback — bare /uploads/<file> paths (legacy upload-temp-image)
 app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
+console.log('Log 7 file');
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 const MONGO_URI = process.env.MONGO_URI;
+console.log('Log 8 file');
 
 mongoose.connect(MONGO_URI)
   .then(() => {
@@ -161,7 +169,7 @@ mongoose.connection.on('error', err => logger.error('MongoDB runtime error', { e
 
 // ─── App Middleware ───────────────────────────────────────────────────────────
 app.use(activityLogger);
-
+console.log('Log 9 file');
 // Global route guard — token + role enforcement for all /api/* routes.
 // Public client-portal paths are explicitly exempted so unauthenticated
 // clients can load their portal, record views, send messages, etc.
@@ -176,27 +184,46 @@ app.use('/api', (req, res, next) => {
   }
   return routeGuard(req, res, next);
 });
-
+console.log('Log 10 file');
 // ─── API Routes ───────────────────────────────────────────────────────────────
 app.use('/api/products', productRoutes);
+console.log('Log 11 file');
 app.use('/api/vendors', vendorRoutes);
+console.log('Log 12 file');
 app.use('/api/clients', clientRoutes);
+console.log('Log 13 file');
 app.use('/api/catalogues', catalogueRoutes);
+console.log('Log 14 file');
 app.use('/api/properties', propertyRoutes);
+console.log('Log 15 file');
 app.use('/api/offsitecatalogues', offsiteCatalogueRoutes);
+console.log('Log 16 file');
 app.use('/api/orders', orderInquiry);
+console.log('Log 17 file');
 app.use('/api/challans', SamplesProvided);
+console.log('Log 18 file');
 app.use('/api/inquiries', SourcingHub);
+console.log('Log 19 file');
 app.use('/api/auth', authRoutes);
+console.log('Log 20 file');
 app.use('/api/payment-tracker', paymentTracker);
+console.log('Log 21 file');
 app.use('/api/image-processing', imageProcessing);
+console.log('Log 22 file');
 app.use('/api/trending-products', trendingProductRoutes);
+console.log('Log 23 file');
 app.use('/api/shipments', shipmentRoutes);
+console.log('Log 24 file');
 app.use('/api/shipping-partners', shippingPartnerRoutes);
+console.log('Log 25 file');
 app.use('/api/lead-scout', leadScoutRoutes);
+console.log('Log 26 file');
 app.use('/api/public-site', publicSiteRoutes);
+console.log('Log 27 file');
 app.use('/api/portal', clientPortalRoutes);
+console.log('Log 28 file');
 app.use('/api/logs', logRoutes);
+console.log('Log 29 file');
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -299,10 +326,10 @@ process.on('uncaughtException', (err) => {
 });
 
 // ─── Server Startup ───────────────────────────────────────────────────────────
-const HOST = '0.0.0.0';
+//const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, HOST, () => {
+app.listen(PORT,() => {
   logger.info('API server started', {
     env: IS_PRODUCTION ? 'production' : 'development',
     port: PORT,
