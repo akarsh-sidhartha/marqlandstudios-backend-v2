@@ -327,12 +327,14 @@ process.on('uncaughtException', (err) => {
 console.log('Log 37 file');
 // ─── Server Startup ───────────────────────────────────────────────────────────
 //const HOST = '0.0.0.0';
-const PORT = process.env.PORT || 5000;
+//const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT;
 console.log('Log 38 file');
 logger.info("after setting the port");
 console.log('PORT value is:', JSON.stringify(process.env.PORT));
 console.log('PORT resolved:', PORT);
 app.listen(PORT,() => {
+  console.log('SERVER STARTED ON PORT', PORT); // raw console, not logger
   logger.info('API server started', {
     env: IS_PRODUCTION ? 'production' : 'development',
     port: PORT,
