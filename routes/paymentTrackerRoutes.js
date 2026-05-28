@@ -49,20 +49,20 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-const express   = require('express');
-const router    = express.Router();
-const mongoose  = require('mongoose');
-const multer    = require('multer');
-const axios     = require('axios');
-const path      = require('path');
+const express = require('express');
+const router = express.Router();
+const mongoose = require('mongoose');
+const multer = require('multer');
+const axios = require('axios');
+const path = require('path');
 
 const { Invoice, ProformaInvoice, Payment, VendorInvoice } = require('../models/paymentTrackerModel');
-const Vendor  = require('../models/Vendor');
-const { authenticate, authorize }                                         = require('../middleware/authMiddleware');
-const { extractFromDocument, checkAIStatus }                              = require('../services/aiService');
-const { scanMailboxesForAttachments, uploadSingleFileBuffer, getFinancialYear, getMonthName } = require('../services/msGraphService');
+const Vendor = require('../models/Vendor');
+const { authenticate, authorize } = require('../middleware/authMiddleware');
+const { extractFromDocument, checkAIStatus } = require('../services/aiService');
+const { scanMailboxesForAttachments, uploadSingleFileBuffer, deleteFile: deleteOneDriveFile, deleteFolderByPath, getFinancialYear, getMonthName } = require('../services/msGraphService');
 const { normalizeFY, fyFromDate, checkIfDuplicate, saveExtractedInvoice } = require('../utils/invoiceHelpers');
-const logger    = require('../utils/logger').child({ module: 'paymentTrackerRoutes' });
+const logger = require('../utils/logger').child({ module: 'paymentTrackerRoutes' });
 
 // ── OneDrive path helper — env-aware ──────────────────────────────────────────
 // odvPath('Invoices', '25-26', 'April') returns:
@@ -77,7 +77,7 @@ try { whatsappService = require('../services/whatsappService'); } catch { /* not
 // ── multer: memory only — for PI attachments and payment screenshots ──────────
 const uploadMem = multer({
   storage: multer.memoryStorage(),
-  limits:  { fileSize: 50 * 1024 * 1024 }, // 50 MB
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
   fileFilter: (req, file, cb) => {
     const allowed = new Set([
       'image/jpeg', 'image/png', 'image/webp', 'image/heic',
@@ -109,11 +109,11 @@ const uploadToOneDrive = async (folderPath, filename, buffer, mimeType) => {
  * Build a safe filename: {ref}_{vendorName?}.{ext}
  */
 const buildFilename = (ref, vendorName, mimeType) => {
-  const ext      = mimeType === 'application/pdf' ? 'pdf'
-                 : mimeType?.startsWith('image/')  ? mimeType.split('/')[1].replace('jpeg', 'jpg')
-                 : 'bin';
-  const safeRef  = (ref        || 'FILE'  ).replace(/[^a-z0-9_\-]/gi, '_');
-  const safeVend = (vendorName || ''      ).replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  const ext = mimeType === 'application/pdf' ? 'pdf'
+    : mimeType?.startsWith('image/') ? mimeType.split('/')[1].replace('jpeg', 'jpg')
+      : 'bin';
+  const safeRef = (ref || 'FILE').replace(/[^a-z0-9_\-]/gi, '_');
+  const safeVend = (vendorName || '').replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
   return safeVend ? `${safeRef}_${safeVend}.${ext}` : `${safeRef}.${ext}`;
 };
 
@@ -169,8 +169,8 @@ router.get('/invoices', async (req, res) => {
   try {
     const { fy, month, page = 1, limit = 50 } = req.query;
     const filter = {};
-    if (fy)    filter.financialYear = fy;
-    if (month) filter.month         = month;
+    if (fy) filter.financialYear = fy;
+    if (month) filter.month = month;
 
     const [invoices, total, financialYears] = await Promise.all([
       Invoice.find(filter)
@@ -216,7 +216,7 @@ router.get('/invoices/:id/file', async (req, res) => {
 
     const { getAccessToken } = require('../services/msGraphService');
     const token = await getAccessToken();
-    const uid   = process.env.MICROSOFT_USER_ID;
+    const uid = process.env.MICROSOFT_USER_ID;
 
     // Fetch fresh item metadata to get a non-expired download URL
     const meta = await axios.get(
@@ -269,7 +269,7 @@ router.post('/invoices',
         } catch (e) { logger.warn('Vendor GST auto-update failed on manual save', { error: e.message }); }
       }
 
-      const d             = req.body.date ? new Date(req.body.date) : new Date();
+      const d = req.body.date ? new Date(req.body.date) : new Date();
       const { fy, month } = fyFromDate(d);
 
       // ── Upload to OneDrive/{root}/Invoices/{FY}/{Month}/ ──────────────────────
@@ -277,12 +277,12 @@ router.post('/invoices',
       let oneDriveFileId = '', oneDriveUrl = '', fileName = '';
       try {
         let fileBuffer = null;
-        let fileMime   = req.body.mimeType || 'image/jpeg';
+        let fileMime = req.body.mimeType || 'image/jpeg';
 
         if (req.file) {
           // Multipart upload — prefer this path
           fileBuffer = req.file.buffer;
-          fileMime   = req.file.mimetype;
+          fileMime = req.file.mimetype;
         } else if (req.body.image) {
           // Legacy base64 JSON path
           const pure = req.body.image.includes(',') ? req.body.image.split(',')[1] : req.body.image;
@@ -290,14 +290,14 @@ router.post('/invoices',
         }
 
         if (fileBuffer) {
-          fileName       = buildFilename(req.body.invoice_number, req.body.vendor_name, fileMime);
+          fileName = buildFilename(req.body.invoice_number, req.body.vendor_name, fileMime);
           const fyFolder = normalizeFY(req.body.financialYear) || fy;
-          const upload   = await uploadToOneDrive(
+          const upload = await uploadToOneDrive(
             odvPath('Invoices', fyFolder, req.body.month || month),  // ← env-aware
             fileName, fileBuffer, fileMime
           );
           oneDriveFileId = upload.fileId;
-          oneDriveUrl    = upload.webUrl;
+          oneDriveUrl = upload.webUrl;
           logger.debug('Invoice uploaded to OneDrive', { fileName, oneDriveUrl });
         }
       } catch (e) {
@@ -306,14 +306,14 @@ router.post('/invoices',
 
       const inv = new Invoice({
         ...req.body,
-        total_amount:  Number(req.body.total_amount || 0),
+        total_amount: Number(req.body.total_amount || 0),
         financialYear: normalizeFY(req.body.financialYear) || fy,
-        month:         req.body.month || month,
+        month: req.body.month || month,
         oneDriveFileId,
         oneDriveUrl,
         fileName,
         createdAt: new Date(),
-        image:     undefined, // never store base64
+        image: undefined, // never store base64
       });
       await inv.save();
 
@@ -358,8 +358,15 @@ router.post('/invoices',
 /** DELETE /invoices/:id */
 router.delete('/invoices/:id', async (req, res) => {
   try {
-    const inv = await Invoice.findByIdAndDelete(req.params.id);
+    const inv = await Invoice.findById(req.params.id);
     if (!inv) return res.status(404).json({ error: 'Invoice not found.' });
+
+    if (inv.oneDriveFileId) {
+      try { await deleteOneDriveFile(inv.oneDriveFileId); }
+      catch (e) { logger.warn('Could not delete invoice file from OneDrive', { fileId: inv.oneDriveFileId, error: e.message }); }
+    }
+
+    await Invoice.findByIdAndDelete(req.params.id);
     logger.info('Invoice deleted', { invoiceId: req.params.id, userId: req.user?.id });
     res.json({ message: 'Invoice deleted.' });
   } catch (err) {
@@ -386,14 +393,14 @@ router.post('/whatsapp-webhook', async (req, res) => {
   res.sendStatus(200); // always acknowledge immediately
 
   try {
-    const value   = req.body.entry?.[0]?.changes?.[0]?.value;
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
     if (!value?.messages) return;
 
-    const msg     = value.messages[0];
+    const msg = value.messages[0];
     const phoneId = value.metadata?.phone_number_id;
     const display = value.metadata?.display_phone_number;
-    const from    = msg.from;
-    const media   = msg.document || msg.image || null;
+    const from = msg.from;
+    const media = msg.document || msg.image || null;
 
     logger.debug('WhatsApp webhook message received', { from, hasMedia: !!media });
 
@@ -421,7 +428,7 @@ router.post('/whatsapp-webhook', async (req, res) => {
       : `⚠️ Duplicate: Invoice #${result.data.invoice_number} already in vault.`;
 
     if (result.success) logger.info('WhatsApp invoice saved', { invoiceId: result.data._id, from });
-    else                logger.info('WhatsApp invoice duplicate skipped', { invoiceNumber: result.data.invoice_number, from });
+    else logger.info('WhatsApp invoice duplicate skipped', { invoiceNumber: result.data.invoice_number, from });
 
     await whatsappService.sendReply(phoneId, from, reply)
       .catch(e => logger.warn('WhatsApp result reply failed', { error: e.message }));
@@ -460,7 +467,7 @@ router.get('/pi', async (req, res) => {
     const { vendorId, status, page = 1, limit = 50 } = req.query;
     const filter = {};
     if (vendorId) filter.vendor = vendorId;
-    if (status)   filter.status = status;
+    if (status) filter.status = status;
 
     const [pis, total] = await Promise.all([
       ProformaInvoice.find(filter)
@@ -473,7 +480,7 @@ router.get('/pi', async (req, res) => {
     ]);
 
     const piIds = pis.map(p => p._id);
-    const pays  = await Payment.find({ proformaInvoice: { $in: piIds } })
+    const pays = await Payment.find({ proformaInvoice: { $in: piIds } })
       .select('proformaInvoice amount paymentDate paymentMode bankRef status paymentRef')
       .sort({ paymentDate: 1 });
 
@@ -481,7 +488,7 @@ router.get('/pi', async (req, res) => {
     pays.forEach(p => { const k = p.proformaInvoice?.toString(); if (!byPI[k]) byPI[k] = []; byPI[k].push(p); });
 
     res.json({
-      data:  pis.map(pi => ({ ...pi.toObject(), payments: byPI[pi._id.toString()] || [] })),
+      data: pis.map(pi => ({ ...pi.toObject(), payments: byPI[pi._id.toString()] || [] })),
       total, page: Number(page), limit: Number(limit),
     });
   } catch (err) {
@@ -517,7 +524,7 @@ router.get('/pi/:id/attachment', async (req, res) => {
 
     const { getAccessToken } = require('../services/msGraphService');
     const token = await getAccessToken();
-    const uid   = process.env.MICROSOFT_USER_ID;
+    const uid = process.env.MICROSOFT_USER_ID;
 
     const meta = await axios.get(
       `https://graph.microsoft.com/v1.0/users/${uid}/drive/items/${pi.attachmentFileId}`,
@@ -556,38 +563,57 @@ router.post('/pi',
       }
 
       // ── Upload PI attachment to OneDrive/{root}/PI-Attachments/{piNumber}/ ────
+      // Sanitise piNumber for use as an OneDrive folder name:
+      // slashes (e.g. PI-267/2026-27) would be interpreted as path separators by
+      // the Graph API and create unexpected nested folders or throw a 404.
+      const safePiFolder = (req.body.piNumber || 'PI')
+        .replace(/\//g, '-')           // PI-267/2026-27 → PI-267-2026-27
+        .replace(/[\\:*?"<>|]/g, '_'); // strip any other chars illegal in folder names
+
       let attachmentFileId = '', attachmentUrl = '', attachmentName = '', attachmentMime = '';
+      let oneDriveWarning = null;
       if (req.file) {
         try {
           attachmentName = req.file.originalname || buildFilename(req.body.piNumber, '', req.file.mimetype);
           attachmentMime = req.file.mimetype;
-          const upload   = await uploadToOneDrive(
-            odvPath('PI-Attachments', req.body.piNumber),  // ← env-aware
+          const upload = await uploadToOneDrive(
+            odvPath('PI-Attachments', safePiFolder),   // ← sanitised folder name
             attachmentName, req.file.buffer, req.file.mimetype
           );
           attachmentFileId = upload.fileId;
           attachmentUrl    = upload.webUrl;
-          logger.debug('PI attachment uploaded to OneDrive', { piNumber: req.body.piNumber, attachmentUrl });
+          logger.info('PI attachment uploaded to OneDrive', { piNumber: req.body.piNumber, safePiFolder, attachmentUrl });
         } catch (e) {
-          logger.warn('PI OneDrive upload failed — saving PI without attachment', { error: e.message });
+          // Keep name/mime blank so the record doesn't appear to have an attachment
+          attachmentName   = '';
+          attachmentMime   = '';
+          oneDriveWarning  = e.message;
+          logger.error('PI OneDrive upload failed', { error: e.message, stack: e.stack, piNumber: req.body.piNumber, safePiFolder });
         }
       }
-
+      // ── Parse any JSON-stringified fields sent via FormData ───────────────────
+      const body = { ...req.body };
+      if (typeof body.items === 'string') {
+        try { body.items = JSON.parse(body.items); } catch { body.items = []; }
+      }
       const pi = new ProformaInvoice({
-        ...req.body,
+        ...body,
         attachmentFileId,
         attachmentUrl,
         attachmentName,
         attachmentMime,
-        attachment:            undefined, // never store base64
+        attachment: undefined, // never store base64
         attachmentMime_legacy: undefined,
       });
       pi.amountPaid = 0;
-      pi.amountDue  = pi.totalAmount;
+      pi.amountDue = pi.totalAmount;
       await pi.save();
 
-      logger.info('PI created', { piId: pi._id, piNumber: pi.piNumber, userId: req.user?.id });
-      res.status(201).json(await ProformaInvoice.findById(pi._id).populate('vendor', 'companyName gstNumber'));
+      logger.info('PI created', { piId: pi._id, piNumber: pi.piNumber, hasAttachment: !!attachmentFileId, userId: req.user?.id });
+      const doc = await ProformaInvoice.findById(pi._id).populate('vendor', 'companyName gstNumber');
+      const payload = doc.toObject();
+      if (oneDriveWarning) payload._oneDriveWarning = `Attachment not saved — OneDrive error: ${oneDriveWarning}`;
+      res.status(201).json(payload);
     } catch (err) {
       if (err.code === 11000) {
         return res.status(409).json({
@@ -618,14 +644,14 @@ router.patch('/pi/:id',
       if (req.file) {
         try {
           const attachmentName = req.file.originalname || buildFilename(pi.piNumber, '', req.file.mimetype);
-          const upload         = await uploadToOneDrive(
+          const upload = await uploadToOneDrive(
             odvPath('PI-Attachments', pi.piNumber),  // ← env-aware
             attachmentName, req.file.buffer, req.file.mimetype
           );
           pi.attachmentFileId = upload.fileId;
-          pi.attachmentUrl    = upload.webUrl;
-          pi.attachmentName   = attachmentName;
-          pi.attachmentMime   = req.file.mimetype;
+          pi.attachmentUrl = upload.webUrl;
+          pi.attachmentName = attachmentName;
+          pi.attachmentMime = req.file.mimetype;
         } catch (e) {
           logger.warn('PI attachment update upload failed', { piId: req.params.id, error: e.message });
         }
@@ -645,9 +671,30 @@ router.delete('/pi/:id', async (req, res) => {
   try {
     const pi = await ProformaInvoice.findById(req.params.id);
     if (!pi) return res.status(404).json({ error: 'PI not found.' });
+
+    // Delete linked payment screenshots + their OneDrive folders
+    const linkedPayments = await Payment.find({ proformaInvoice: pi._id });
+    for (const pay of linkedPayments) {
+      if (pay.screenshotFileId) {
+        try { await deleteOneDriveFile(pay.screenshotFileId); }
+        catch (e) { logger.warn('Could not delete payment screenshot from OneDrive', { fileId: pay.screenshotFileId, error: e.message }); }
+      }
+      if (pay.paymentRef) {
+        try { await deleteFolderByPath(odvPath('Payments', pay.paymentRef)); }
+        catch (e) { /* folder may not exist */ }
+      }
+    }
     await Payment.deleteMany({ proformaInvoice: pi._id });
+
+    // Delete PI attachment folder from OneDrive (same sanitisation as POST /pi)
+    if (pi.piNumber) {
+      const safePiFolder = pi.piNumber.replace(/\//g, '-').replace(/[\\:*?"<>|]/g, '_');
+      try { await deleteFolderByPath(odvPath('PI-Attachments', safePiFolder)); }
+      catch (e) { logger.warn('Could not delete PI folder from OneDrive', { piNumber: pi.piNumber, error: e.message }); }
+    }
+
     await ProformaInvoice.findByIdAndDelete(req.params.id);
-    logger.info('PI deleted (cascade payments)', { piId: req.params.id, userId: req.user?.id });
+    logger.info('PI deleted (cascade payments + OneDrive cleanup)', { piId: req.params.id, userId: req.user?.id });
     res.json({ message: 'PI deleted.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -663,15 +710,15 @@ router.get('/payments', async (req, res) => {
   try {
     const { vendorId, mappedTo, status, page = 1, limit = 50 } = req.query;
     const filter = {};
-    if (vendorId) filter.vendor   = vendorId;
+    if (vendorId) filter.vendor = vendorId;
     if (mappedTo) filter.mappedTo = mappedTo;
-    if (status)   filter.status   = status;
+    if (status) filter.status = status;
 
     const [payments, total] = await Promise.all([
       Payment.find(filter)
-        .populate('vendor',          'companyName')
+        .populate('vendor', 'companyName')
         .populate('proformaInvoice', 'piNumber totalAmount amountPaid status')
-        .populate('vendorInvoice',   'invoice_number total_amount vendor_name')
+        .populate('vendorInvoice', 'invoice_number total_amount vendor_name')
         .sort({ paymentDate: -1 })
         .skip((page - 1) * limit)
         .limit(Number(limit)),
@@ -697,7 +744,7 @@ router.get('/payments/:id/screenshot', async (req, res) => {
 
     const { getAccessToken } = require('../services/msGraphService');
     const token = await getAccessToken();
-    const uid   = process.env.MICROSOFT_USER_ID;
+    const uid = process.env.MICROSOFT_USER_ID;
 
     const meta = await axios.get(
       `https://graph.microsoft.com/v1.0/users/${uid}/drive/items/${pay.screenshotFileId}`,
@@ -734,7 +781,7 @@ router.post('/payments',
       } = req.body;
 
       // Collision-proof paymentRef
-      const last  = await Payment.findOne({}, { paymentRef: 1 }).sort({ paymentRef: -1 });
+      const last = await Payment.findOne({}, { paymentRef: 1 }).sort({ paymentRef: -1 });
       let nextNum = 1;
       if (last?.paymentRef) { const m = last.paymentRef.match(/PAY-(\d+)/); if (m) nextNum = parseInt(m[1], 10) + 1; }
       let paymentRef = null;
@@ -751,12 +798,12 @@ router.post('/payments',
         try {
           screenshotName = req.file.originalname || buildFilename(paymentRef, '', req.file.mimetype);
           screenshotMime = req.file.mimetype;
-          const upload   = await uploadToOneDrive(
+          const upload = await uploadToOneDrive(
             odvPath('Payments', paymentRef),  // ← env-aware
             screenshotName, req.file.buffer, req.file.mimetype
           );
           screenshotFileId = upload.fileId;
-          screenshotUrl    = upload.webUrl;
+          screenshotUrl = upload.webUrl;
           logger.debug('Payment screenshot uploaded to OneDrive', { paymentRef, screenshotUrl });
         } catch (e) {
           logger.warn('Payment screenshot OneDrive upload failed — recording payment without screenshot', { error: e.message });
@@ -768,16 +815,16 @@ router.post('/payments',
 
       const payment = new Payment({
         paymentRef,
-        vendor:          vendor   || null,
+        vendor: vendor || null,
         paymentDate, amount: Number(amount), currency, paymentMode, bankRef, remarks,
-        mappedTo:        mappedTo || 'advance',
-        proformaInvoice: piId    || null,
-        vendorInvoice:   viId    || null,
+        mappedTo: mappedTo || 'advance',
+        proformaInvoice: piId || null,
+        vendorInvoice: viId || null,
         screenshotFileId,
         screenshotUrl,
         screenshotName,
         screenshotMime,
-        screenshot:     undefined, // never store base64
+        screenshot: undefined, // never store base64
       });
       await payment.save();
 
@@ -804,8 +851,8 @@ router.post('/payments',
             await Payment.findByIdAndDelete(payment._id);
             throw new Error(`Payment exceeds PI balance of ₹${linkedPi.totalAmount - linkedPi.amountPaid}`);
           }
-          linkedPi.amountPaid        += Number(amount);
-          payment.proformaInvoice     = linkedPi._id;
+          linkedPi.amountPaid += Number(amount);
+          payment.proformaInvoice = linkedPi._id;
           if (linkedPi.amountPaid >= linkedPi.totalAmount) linkedPi.status = 'invoiced';
           await linkedPi.save();
         }
@@ -819,9 +866,9 @@ router.post('/payments',
       logger.info('Payment recorded', { paymentRef, amount: Number(amount), mappedTo: mappedTo || 'advance', userId: req.user?.id });
 
       const populated = await Payment.findById(payment._id)
-        .populate('vendor',          'companyName')
+        .populate('vendor', 'companyName')
         .populate('proformaInvoice', 'piNumber totalAmount amountPaid amountDue status')
-        .populate('vendorInvoice',   'invoice_number total_amount vendor_name');
+        .populate('vendorInvoice', 'invoice_number total_amount vendor_name');
 
       res.status(201).json(populated);
     } catch (err) {
@@ -835,7 +882,7 @@ router.patch('/payments/:id/map', async (req, res) => {
   try {
     const { mappedTo, proformaInvoice: piId, vendorInvoice: viId } = req.body;
     const payment = await Payment.findById(req.params.id);
-    if (!payment)                       return res.status(404).json({ error: 'Payment not found.' });
+    if (!payment) return res.status(404).json({ error: 'Payment not found.' });
     if (payment.mappedTo !== 'advance') return res.status(400).json({ error: 'Only advances can be re-mapped.' });
 
     if (mappedTo === 'proforma_invoice' && piId) {
@@ -846,14 +893,14 @@ router.patch('/payments/:id/map', async (req, res) => {
       pi.amountPaid += payment.amount;
       if (pi.amountPaid >= pi.totalAmount && pi.finalInvoice) pi.status = 'invoiced';
       await pi.save();
-      payment.mappedTo        = 'proforma_invoice';
+      payment.mappedTo = 'proforma_invoice';
       payment.proformaInvoice = piId;
       if (pi.vendor) payment.vendor = pi.vendor;
 
     } else if (mappedTo === 'vendor_invoice' && viId) {
       const vi = await Invoice.findById(viId);
       if (!vi) throw new Error('Invoice not found in vault.');
-      payment.mappedTo      = 'vendor_invoice';
+      payment.mappedTo = 'vendor_invoice';
       payment.vendorInvoice = viId;
       if (vi.vendor_name) {
         const vendorDoc = await Vendor.findOne({ companyName: new RegExp(vi.vendor_name, 'i') });
@@ -867,9 +914,9 @@ router.patch('/payments/:id/map', async (req, res) => {
     logger.info('Payment remapped', { paymentId: req.params.id, mappedTo, userId: req.user?.id });
 
     const populated = await Payment.findById(payment._id)
-      .populate('vendor',          'companyName')
+      .populate('vendor', 'companyName')
       .populate('proformaInvoice', 'piNumber totalAmount amountPaid amountDue status')
-      .populate('vendorInvoice',   'invoice_number total_amount vendor_name');
+      .populate('vendorInvoice', 'invoice_number total_amount vendor_name');
     res.json(populated);
   } catch (err) {
     logger.error('Payment remap failed', { paymentId: req.params.id, error: err.message });
@@ -883,11 +930,11 @@ router.post('/payments/link-to-invoice', async (req, res) => {
     if (!piId || !invoiceId) return res.status(400).json({ error: 'piId and invoiceId are required.' });
 
     const [pi, invoice] = await Promise.all([ProformaInvoice.findById(piId), Invoice.findById(invoiceId)]);
-    if (!pi)      return res.status(404).json({ error: 'PI not found.' });
+    if (!pi) return res.status(404).json({ error: 'PI not found.' });
     if (!invoice) return res.status(404).json({ error: 'Invoice not found in vault.' });
 
     pi.finalInvoice = new mongoose.Types.ObjectId(invoiceId);
-    pi.status       = 'invoiced';
+    pi.status = 'invoiced';
     await pi.save();
 
     const updated = await Payment.updateMany(
@@ -921,6 +968,17 @@ router.delete('/payments/:id', async (req, res) => {
     }
 
     await Payment.findByIdAndDelete(req.params.id);
+
+    // Delete payment screenshot file and OneDrive folder
+    if (payment.screenshotFileId) {
+      try { await deleteOneDriveFile(payment.screenshotFileId); }
+      catch (e) { logger.warn('Could not delete payment screenshot from OneDrive', { fileId: payment.screenshotFileId, error: e.message }); }
+    }
+    if (payment.paymentRef) {
+      try { await deleteFolderByPath(odvPath('Payments', payment.paymentRef)); }
+      catch (e) { /* folder may not exist */ }
+    }
+
     logger.info('Payment deleted', { paymentId: req.params.id, paymentRef: payment.paymentRef, userId: req.user?.id });
     res.json({ message: 'Payment deleted.' });
   } catch (err) {
