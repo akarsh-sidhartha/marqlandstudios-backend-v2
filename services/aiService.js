@@ -53,15 +53,21 @@ const getGeminiModels = async (apiKey) => {
 };
 
 // ── Provider 1: GEMINI ────────────────────────────────────────────────────────
-const callGemini = async (base64Data, mimeType, prompt) => {
+// extraImages: [{ base64, mimeType }] — for multi-image calls (e.g. card front + back)
+const callGemini = async (base64Data, mimeType, prompt, extraImages = []) => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  const imageParts = [
+    { inlineData: { mimeType: mimeType || 'image/jpeg', data: base64Data } },
+    ...extraImages.map(img => ({ inlineData: { mimeType: img.mimeType || 'image/jpeg', data: img.base64 } })),
+  ];
 
   const payload = {
     contents: [{
       parts: [
         { text: prompt },
-        { inlineData: { mimeType: mimeType || 'image/jpeg', data: base64Data } },
+        ...imageParts,
       ],
     }],
   };
@@ -90,13 +96,18 @@ const callGemini = async (base64Data, mimeType, prompt) => {
 };
 
 // ── Provider 2: MISTRAL (pixtral-12b — vision model) ─────────────────────────
-const callMistral = async (base64Data, mimeType, prompt) => {
+// extraImages: [{ base64, mimeType }] — for multi-image calls (e.g. card front + back)
+const callMistral = async (base64Data, mimeType, prompt, extraImages = []) => {
   const apiKey = process.env.MISTRAL_API_KEY;
   if (!apiKey) throw new Error('MISTRAL_API_KEY not set');
 
-  const imageUrl = base64Data.startsWith('data:')
-    ? base64Data
-    : `data:${mimeType || 'image/jpeg'};base64,${base64Data}`;
+  const toDataUrl = (b64, mime) =>
+    b64.startsWith('data:') ? b64 : `data:${mime || 'image/jpeg'};base64,${b64}`;
+
+  const imageBlocks = [
+    { type: 'image_url', image_url: { url: toDataUrl(base64Data, mimeType) } },
+    ...extraImages.map(img => ({ type: 'image_url', image_url: { url: toDataUrl(img.base64, img.mimeType) } })),
+  ];
 
   const res = await axios.post(
     'https://api.mistral.ai/v1/chat/completions',
@@ -105,8 +116,8 @@ const callMistral = async (base64Data, mimeType, prompt) => {
       messages: [{
         role:    'user',
         content: [
-          { type: 'text',      text: prompt },
-          { type: 'image_url', image_url: { url: imageUrl } },
+          { type: 'text', text: prompt },
+          ...imageBlocks,
         ],
       }],
       max_tokens:  800,
@@ -190,14 +201,33 @@ const extractFieldsFromRawText = (text) => {
 };
 
 // ── Business card heuristics ──────────────────────────────────────────────────
-const extractCardFieldsFromText = (text) => ({
-  company_name: null,
-  name:         null,
-  phone:        text.match(/(?:\+91[\s-]?)?[6-9]\d{9}/)?.[0]   || null,
-  email:        text.match(/[\w.+-]+@[\w-]+\.[a-z]{2,}/i)?.[0] || null,
-  _provider:    'tesseract',
-  _raw_text:    text,
-});
+const extractCardFieldsFromText = (text) => {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 1);
+
+  // Phone: Indian mobile or international format
+  const phone = text.match(/(?:\+\d{1,3}[\s-]?)?(?:\(?\d{2,4}\)?[\s-]?)?[6-9]\d{9}/)?.[0]
+             || text.match(/\+?[\d\s()\-]{10,}/)?.[0]?.trim()
+             || null;
+
+  // Email
+  const email = text.match(/[\w.+-]+@[\w-]+\.[a-z]{2,}/i)?.[0] || null;
+
+  // Company: line containing business keywords
+  const companyLine = lines.find(l =>
+    /pvt|ltd|llp|inc|corp|industries|enterprise|trading|solutions|services|group|associates/i.test(l)
+  );
+  const company_name = companyLine ? companyLine.replace(/[^a-zA-Z0-9\s&.,()\-]/g, '').trim() : null;
+
+  // Name: first short line (2–4 words, no digits, not a company keyword, not already picked)
+  const nameLine = lines.find(l =>
+    l !== companyLine &&
+    /^[A-Z][a-z]+(\s[A-Z][a-z.]+){1,3}$/.test(l) &&
+    !/pvt|ltd|llp|inc|corp|@|\d/i.test(l)
+  );
+  const name = nameLine || null;
+
+  return { company_name, name, phone, email, _provider: 'tesseract', _raw_text: text };
+};
 
 // ── Prompts ───────────────────────────────────────────────────────────────────
 const INVOICE_PROMPT = `Extract Indian Tax Invoice details from this document.
@@ -216,15 +246,19 @@ Return ONLY a valid JSON object with these exact fields (use null for missing):
 }
 No explanation. No markdown. Just the JSON object.`;
 
-const BUSINESS_CARD_PROMPT = `Extract contact details from this business card.
-Return ONLY a valid JSON object:
+const BUSINESS_CARD_PROMPT = `Extract contact details from this business card image (or images — front and back may both be provided).
+Scan ALL text visible across every image and return ONLY a valid JSON object with these exact fields (null if not found):
 {
-  "company_name": "string",
+  "company_name": "full company or organisation name",
   "name": "person's full name",
-  "phone": "phone number with country code",
+  "phone": "phone number including country code if present",
   "email": "email address"
 }
-No explanation. No markdown. Just the JSON object.`;
+Rules:
+- If multiple phone numbers exist, prefer the mobile number.
+- If multiple emails exist, prefer the direct/personal one over generic ones (info@, hello@).
+- "name" is the individual person's name, not the company name.
+- No explanation. No markdown. Just the JSON object.`;
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -278,14 +312,32 @@ const extractFromDocument = async (base64Data, mimeType) => {
   throw new Error(`All AI providers failed. Errors: ${summary}`);
 };
 
-const extractFromBusinessCard = async (base64Data) => {
-  const pureBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
-  const mimeType   = 'image/jpeg';
+/**
+ * extractFromBusinessCard
+ *
+ * @param {string} base64Data   — base64 (with or without data-URI prefix) of the FRONT image
+ * @param {string} [backImageData] — optional base64 of the BACK image
+ *
+ * Both Gemini and Mistral receive front + back together so the AI can merge
+ * information from both sides (e.g. company on front, email on back).
+ * Tesseract runs OCR on both images and concatenates the text before parsing.
+ */
+const extractFromBusinessCard = async (base64Data, backImageData = null) => {
+  const stripPrefix = (b64) => (b64 && b64.includes(',') ? b64.split(',')[1] : b64);
+
+  const frontBase64 = stripPrefix(base64Data);
+  const backBase64  = backImageData ? stripPrefix(backImageData) : null;
+  const mimeType    = 'image/jpeg';
+
+  // Build extraImages array for providers that support multi-image
+  const extraImages = backBase64
+    ? [{ base64: backBase64, mimeType }]
+    : [];
 
   if (process.env.GEMINI_API_KEY) {
     try {
-      const result = await callGemini(pureBase64, mimeType, BUSINESS_CARD_PROMPT);
-      logger.debug('Business card extracted via Gemini');
+      const result = await callGemini(frontBase64, mimeType, BUSINESS_CARD_PROMPT, extraImages);
+      logger.debug('Business card extracted via Gemini', { sides: extraImages.length + 1 });
       return { ...result, _provider: 'gemini' };
     } catch (err) {
       logger.warn('Gemini card scan failed — trying Mistral', { error: err.message });
@@ -294,20 +346,30 @@ const extractFromBusinessCard = async (base64Data) => {
 
   if (process.env.MISTRAL_API_KEY) {
     try {
-      const result = await callMistral(pureBase64, mimeType, BUSINESS_CARD_PROMPT);
-      logger.debug('Business card extracted via Mistral');
+      const result = await callMistral(frontBase64, mimeType, BUSINESS_CARD_PROMPT, extraImages);
+      logger.debug('Business card extracted via Mistral', { sides: extraImages.length + 1 });
       return { ...result, _provider: 'mistral' };
     } catch (err) {
       logger.warn('Mistral card scan failed — trying Tesseract', { error: err.message });
     }
   }
 
+  // Tesseract: OCR both sides, concatenate text, then parse
   try {
-    const { data: { text } } = await require('tesseract.js').recognize(
-      Buffer.from(pureBase64, 'base64'), 'eng', { logger: () => {} }
-    );
-    logger.info('Business card extracted via Tesseract (fallback)');
-    return extractCardFieldsFromText(text);
+    const Tesseract = require('tesseract.js');
+    const recognise = async (b64) => {
+      const { data: { text } } = await Tesseract.recognize(
+        Buffer.from(b64, 'base64'), 'eng', { logger: () => {} }
+      );
+      return text;
+    };
+
+    const frontText = await recognise(frontBase64);
+    const backText  = backBase64 ? await recognise(backBase64) : '';
+    const combined  = [frontText, backText].filter(Boolean).join('\n');
+
+    logger.info('Business card extracted via Tesseract (fallback)', { sides: backBase64 ? 2 : 1 });
+    return extractCardFieldsFromText(combined);
   } catch (err) {
     logger.error('All AI providers failed for business card', { error: err.message });
     throw new Error('All AI providers failed for business card scan.');

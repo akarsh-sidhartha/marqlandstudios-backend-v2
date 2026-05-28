@@ -12,6 +12,11 @@
  *     Old path: root/Orders/{client}/{FY}/{contact}/{ref}
  *     New path: root/website/orders/{client}/{FY}/{contact}/{ref}
  *   - All other existing exports unchanged.
+ *
+ * CHANGE (attachment URLs):
+ *   - `uploadFiles` now returns an array of { name, size, webUrl, downloadUrl }
+ *     for every successfully uploaded file, so callers can persist those URLs
+ *     to MongoDB without a separate listFolderContents round-trip.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -149,21 +154,44 @@ const buildOrderFolderHierarchy = async (orderData) => {
 /**
  * Upload an array of files to a OneDrive folder.
  * Each file: { name, base64, type }
- * (Existing — unchanged, used by orderInquiry routes)
+ *
+ * CHANGED: now returns an array of metadata objects for each successfully
+ * uploaded file so the caller can persist webUrl/downloadUrl to MongoDB
+ * without a separate listFolderContents round-trip.
+ *
+ * Returns: Array<{ name, size, webUrl, downloadUrl }>
+ *   - size        — bytes as reported by Graph after upload
+ *   - webUrl      — browser-viewable OneDrive share link
+ *   - downloadUrl — direct download link (@microsoft.graph.downloadUrl)
+ *                   NOTE: this URL expires (~1 hour); it is stored as a
+ *                   convenience but the live link is always re-fetched
+ *                   via GET /:id/attachments when the order is opened.
  */
 const uploadFiles = async (folderId, files) => {
-  if (!files?.length) return;
+  if (!files?.length) return [];
   const h = await authHeaders();
+  const uploaded = [];
+
   for (const f of files) {
     const raw = f.base64 || f.data;
     if (!raw) continue;
     const pure = raw.includes(',') ? raw.split(',')[1] : raw;
-    await axios.put(
+
+    const r = await axios.put(
       `${driveBase()}/items/${folderId}:/${f.name}:/content`,
       Buffer.from(pure, 'base64'),
       { headers: { ...h, 'Content-Type': f.type || 'application/octet-stream' } }
     );
+
+    uploaded.push({
+      name:        r.data.name,
+      size:        r.data.size,
+      webUrl:      r.data.webUrl      || null,
+      downloadUrl: r.data['@microsoft.graph.downloadUrl'] || null,
+    });
   }
+
+  return uploaded;
 };
 
 /** List children of a folder */

@@ -25,6 +25,19 @@
  *
  * This is handled centrally by utils/oneDrivePaths.js — no duplication here.
  * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * CHANGE (attachment URLs):
+ * ─────────────────────────────────────────────────────────────────────────────
+ * POST /  — uploadFiles() now returns { name, size, webUrl, downloadUrl } for
+ *           each file. These are persisted to MongoDB so the Files column in
+ *           OrderTracker renders live links immediately on list load, without
+ *           requiring the user to click into the order detail popup.
+ *
+ * PATCH /:id — after uploading new files, their webUrl/downloadUrl are merged
+ *              back into the attachments array saved to MongoDB. Previously
+ *              only the name/size from the client payload was kept, so links
+ *              were lost on edit.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const express      = require('express');
@@ -70,13 +83,14 @@ const genToken = () => {
 };
 
 //const makePortalSlug = (refOrId) => `${genToken()}-${slugify(String(refOrId))}`;
-const makePortalSlug = () => 
+const makePortalSlug = () =>
   Array.from({length: 10}, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('');
 
 // ─── GET / — list all orders ──────────────────────────────────────────────────
 // FAST path: returns MongoDB data immediately — no OneDrive calls.
-// Attachment metadata (name, type, size, webUrl) is stored on the DB record.
-// The live OneDrive folder is fetched only when an order is opened (see /:id/attachments).
+// Attachment metadata (name, type, size, webUrl, downloadUrl) is stored on the
+// DB record and populated at creation / edit time. The live OneDrive folder is
+// only re-fetched when an order is opened (see /:id/attachments).
 router.get('/', async (req, res) => {
   try {
     const orders = await OrderInquiry.find().sort({ updatedAt: -1 }).lean();
@@ -128,6 +142,16 @@ router.post('/', async (req, res) => {
     if (!clientName || !orderPlacedBy)
       return res.status(400).json({ error: 'Client Name and Contact Person are required.' });
 
+    // Base fallback: strip base64 but keep name/type/size/lastModified.
+    // This is used only when OneDrive upload fails — webUrl will be absent
+    // and the row chip will render without a link (graceful degradation).
+    const cleanedAttachments = (attachments || []).map(({ name, type, size, lastModified }) => ({
+      name, type, size, lastModified,
+    }));
+
+    // Will be replaced with richer metadata if OneDrive upload succeeds.
+    let savedAttachmentMeta = cleanedAttachments;
+
     // Create OneDrive folder — non-blocking on failure (order still saves).
     // ORDER_FOLDER_ROOT switches automatically between 'website/orders' (prod)
     // and 'development/orders' (dev) via utils/oneDrivePaths.
@@ -137,7 +161,27 @@ router.post('/', async (req, res) => {
           ...req.body,
           folderRoot: ORDER_FOLDER_ROOT,   // ← env-aware: 'website/orders' or 'development/orders'
         });
-        await uploadFiles(folderId, attachments);
+
+        // uploadFiles now returns [{ name, size, webUrl, downloadUrl }, ...]
+        // Use this to persist live URLs to MongoDB — no separate listFolderContents needed.
+        const uploadedMeta = await uploadFiles(folderId, attachments);
+
+        if (uploadedMeta?.length) {
+          // Merge: keep original type/lastModified from the client payload,
+          // enrich with webUrl/downloadUrl/size from the Graph response.
+          const byName = Object.fromEntries(
+            (attachments || []).map(a => [a.name, { type: a.type, lastModified: a.lastModified }])
+          );
+          savedAttachmentMeta = uploadedMeta.map(u => ({
+            name:         u.name,
+            size:         u.size,
+            webUrl:       u.webUrl       || null,
+            downloadUrl:  u.downloadUrl  || null,
+            type:         byName[u.name]?.type         || null,
+            lastModified: byName[u.name]?.lastModified || null,
+          }));
+        }
+
         return folderUrl;
       } catch (err) {
         logger.warn('OneDrive folder creation failed — order will save without folder link', {
@@ -147,17 +191,12 @@ router.post('/', async (req, res) => {
       }
     })();
 
-    // Strip base64 from attachment records before saving to MongoDB
-    const cleanedAttachments = (attachments || []).map(({ name, type, size, lastModified }) => ({
-      name, type, size, lastModified,
-    }));
-
     const order = new OrderInquiry({
       title, clientName, orderPlacedBy, description, refNumber,
       orderType:         orderType || 'product',
       status:            'inquiry',
       oneDriveFolderUrl: folderLink,
-      attachments:       cleanedAttachments,
+      attachments:       savedAttachmentMeta,  // ← includes webUrl/downloadUrl when OneDrive succeeds
     });
     await order.save();
 
@@ -227,10 +266,51 @@ router.patch('/:id', async (req, res) => {
           for (const f of toDelete) {
             await deleteFile(f.id).catch(e => logger.warn('OneDrive file delete failed', { file: f.name, error: e.message }));
           }
+
+          // Upload new files (those with base64 data) and capture their URLs.
           const newUploads = attachments.filter(a => a.base64);
-          if (newUploads.length) await uploadFiles(folderId, newUploads);
+          let uploadedMeta = [];
+          if (newUploads.length) {
+            uploadedMeta = await uploadFiles(folderId, newUploads);
+          }
+
+          // Rebuild the attachments array for MongoDB:
+          //   - existing files (no base64): keep whatever webUrl/downloadUrl they already have
+          //   - newly uploaded files: enrich with fresh webUrl/downloadUrl from Graph response
+          const uploadedByName = Object.fromEntries(uploadedMeta.map(u => [u.name, u]));
+          updateData.attachments = attachments.map(a => {
+            if (a.base64) {
+              // Newly uploaded — use Graph metadata if available, fall back to client payload
+              const u = uploadedByName[a.name];
+              return {
+                name:         a.name,
+                size:         u?.size         || a.size         || null,
+                webUrl:       u?.webUrl       || null,
+                downloadUrl:  u?.downloadUrl  || null,
+                type:         a.type          || null,
+                lastModified: a.lastModified  || null,
+              };
+            }
+            // Existing file — preserve all stored fields (including webUrl)
+            return {
+              name:         a.name,
+              size:         a.size         || null,
+              webUrl:       a.webUrl       || null,
+              downloadUrl:  a.downloadUrl  || null,
+              type:         a.type         || null,
+              lastModified: a.lastModified || null,
+            };
+          });
         }
       }
+    } else if (attachments) {
+      // No OneDrive folder — still persist the attachment list as-is
+      // (preserves any webUrl already on existing records, strips base64)
+      updateData.attachments = attachments.map(({ name, type, size, lastModified, webUrl, downloadUrl }) => ({
+        name, type, size, lastModified,
+        ...(webUrl      && { webUrl }),
+        ...(downloadUrl && { downloadUrl }),
+      }));
     }
 
     const updated = await OrderInquiry.findByIdAndUpdate(

@@ -69,7 +69,7 @@ router.post('/',
   upload.array('mediaFiles', 20),
   async (req, res) => {
     try {
-      const { companyName, state, category, suppliedProducts, description, gstNumber } = req.body;
+      const { companyName, state, city, category, subCategory, suppliedProducts, description, gstNumber } = req.body;
       if (!companyName?.trim())
         return res.status(400).json({ message: 'Company name is required.' });
 
@@ -86,7 +86,7 @@ router.post('/',
 
       const vendor = await Vendor.create({
         companyName: companyName.trim(),
-        state, category, suppliedProducts, description, gstNumber,
+        state, city, category, subCategory, suppliedProducts, description, gstNumber,
         contacts,
         media,
       });
@@ -114,7 +114,7 @@ router.put('/:id',
       const vendor = await Vendor.findById(req.params.id);
       if (!vendor) return res.status(404).json({ message: 'Vendor not found.' });
 
-      const { companyName, state, category, suppliedProducts, description, gstNumber, keepMediaIds } = req.body;
+      const { companyName, state, city, category, subCategory, suppliedProducts, description, gstNumber, keepMediaIds } = req.body;
 
       const keepIds = keepMediaIds
         ? keepMediaIds.split(',').map(s => s.trim()).filter(Boolean)
@@ -143,7 +143,9 @@ router.put('/:id',
         {
           companyName:      companyName?.trim()     ?? vendor.companyName,
           state:            state                   ?? vendor.state,
+          city:             city                    ?? vendor.city,
           category:         category                ?? vendor.category,
+          subCategory:      subCategory             ?? vendor.subCategory,
           suppliedProducts: suppliedProducts         ?? vendor.suppliedProducts,
           description:      description              ?? vendor.description,
           gstNumber:        gstNumber                ?? vendor.gstNumber,
@@ -213,12 +215,12 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// ─── POST /scan-card — AI business card scan (UNCHANGED) ─────────────────────
+// ─── POST /scan-card — AI business card scan ──────────────────────────────────
 router.post('/scan-card', async (req, res) => {
   try {
-    const { image, mimeType } = req.body;
+    const { image, backImage, mimeType } = req.body;
     if (!image) return res.status(400).json({ message: 'Image is required.' });
-    const result = await extractFromBusinessCard(image);
+    const result = await extractFromBusinessCard(image, backImage);
     res.json(result);
   } catch (err) {
     logger.error('Business card scan failed', { error: err.message });
