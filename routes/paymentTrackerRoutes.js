@@ -23,6 +23,16 @@
  *    GET /pi/:id/attachment           — stream PI attachment inline
  *    GET /payments/:id/screenshot     — stream payment screenshot inline
  *
+ * DEV / PROD ISOLATION:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * When NODE_ENV !== 'production', all OneDrive uploads are rooted under
+ * 'development' instead of 'website':
+ *   production  →  website/Invoices/...   website/PI-Attachments/...   website/Payments/...
+ *   development →  development/Invoices/... development/PI-Attachments/... development/Payments/...
+ *
+ * This is handled centrally by utils/oneDrivePaths.js via odvPath().
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
  * ROUTES ADDED FROM invoiceRoute.js (de-duplicated — newer versions kept):
  *    GET/POST /whatsapp-webhook    — already in paymentTrackerRoutes ✓
  *    POST     /outlook-sync        — already in paymentTrackerRoutes ✓ (disabled)
@@ -54,6 +64,12 @@ const { scanMailboxesForAttachments, uploadSingleFileBuffer, getFinancialYear, g
 const { normalizeFY, fyFromDate, checkIfDuplicate, saveExtractedInvoice } = require('../utils/invoiceHelpers');
 const logger    = require('../utils/logger').child({ module: 'paymentTrackerRoutes' });
 
+// ── OneDrive path helper — env-aware ──────────────────────────────────────────
+// odvPath('Invoices', '25-26', 'April') returns:
+//   production  → ['website', 'Invoices', '25-26', 'April']
+//   development → ['development', 'Invoices', '25-26', 'April']
+const { odvPath } = require('../utils/oneDrivePaths');
+
 // ── WhatsApp service (optional — gracefully absent in test/CI) ─────────────────
 let whatsappService = null;
 try { whatsappService = require('../services/whatsappService'); } catch { /* not available */ }
@@ -72,18 +88,18 @@ const uploadMem = multer({
   },
 });
 
-// ── OneDrive folder helpers ───────────────────────────────────────────────────
+// ── OneDrive upload wrapper ───────────────────────────────────────────────────
 
 /**
- * Upload a buffer to OneDrive and return { fileId, webUrl, downloadUrl }.
- * Wraps uploadSingleFileBuffer and also captures @microsoft.graph.downloadUrl.
+ * Upload a buffer to OneDrive and return { fileId, webUrl }.
+ * Wraps uploadSingleFileBuffer.
  * NOTE: downloadUrl expires ~1h — use the proxy routes for inline display.
  */
 const uploadToOneDrive = async (folderPath, filename, buffer, mimeType) => {
   const result = await uploadSingleFileBuffer(folderPath, filename, buffer, mimeType);
   return {
-    fileId:      result.fileId,
-    webUrl:      result.webUrl,
+    fileId: result.fileId,
+    webUrl: result.webUrl,
     // downloadUrl may not be returned by uploadSingleFileBuffer — that's fine,
     // the proxy endpoint fetches it fresh each time it's needed.
   };
@@ -187,7 +203,7 @@ router.get('/invoices/:id', async (req, res) => {
 
 /**
  * GET /invoices/:id/file
- * NEW PROXY ROUTE — streams the invoice file from OneDrive inline.
+ * PROXY ROUTE — streams the invoice file from OneDrive inline.
  * Avoids expiring @microsoft.graph.downloadUrl by fetching a fresh one
  * via the Graph API each time, then proxying the bytes to the browser.
  * Frontend: <iframe src="/api/payment-tracker/invoices/:id/file" />
@@ -227,10 +243,10 @@ router.get('/invoices/:id/file', async (req, res) => {
  * POST /invoices
  * Manually save invoice to vault. Accepts multipart (file upload) OR JSON (base64).
  *
- * STORAGE CHANGE:
- *   Folder: ['Invoices', fy, month]  →  ['website', 'Invoices', fy, month]
- *   Method: uploadSingleFile (base64) →  uploadSingleFileBuffer (Buffer, cleaner)
- *   Frontend can now send multipart/form-data with a 'file' field instead of base64 JSON.
+ * STORAGE:
+ *   prod  → OneDrive: website/Invoices/{FY}/{Month}/
+ *   dev   → OneDrive: development/Invoices/{FY}/{Month}/
+ *   odvPath() handles the switch automatically.
  */
 router.post('/invoices',
   uploadMem.single('file'),   // optional multipart file — falls through if JSON body
@@ -256,7 +272,8 @@ router.post('/invoices',
       const d             = req.body.date ? new Date(req.body.date) : new Date();
       const { fy, month } = fyFromDate(d);
 
-      // ── Upload to OneDrive/website/Invoices/{FY}/{Month}/ ────────────────────
+      // ── Upload to OneDrive/{root}/Invoices/{FY}/{Month}/ ──────────────────────
+      // odvPath('Invoices', fyFolder, month) resolves root based on NODE_ENV.
       let oneDriveFileId = '', oneDriveUrl = '', fileName = '';
       try {
         let fileBuffer = null;
@@ -276,7 +293,7 @@ router.post('/invoices',
           fileName       = buildFilename(req.body.invoice_number, req.body.vendor_name, fileMime);
           const fyFolder = normalizeFY(req.body.financialYear) || fy;
           const upload   = await uploadToOneDrive(
-            ['website', 'Invoices', fyFolder, req.body.month || month],
+            odvPath('Invoices', fyFolder, req.body.month || month),  // ← env-aware
             fileName, fileBuffer, fileMime
           );
           oneDriveFileId = upload.fileId;
@@ -488,7 +505,7 @@ router.get('/pi/:id', async (req, res) => {
 
 /**
  * GET /pi/:id/attachment
- * NEW PROXY ROUTE — streams PI attachment inline from OneDrive.
+ * PROXY ROUTE — streams PI attachment inline from OneDrive.
  * Frontend: <iframe src="/api/payment-tracker/pi/:id/attachment" />
  *        or <img    src="/api/payment-tracker/pi/:id/attachment" />
  */
@@ -522,8 +539,10 @@ router.get('/pi/:id/attachment', async (req, res) => {
 
 /**
  * POST /pi
- * STORAGE CHANGE: attachment (was base64 in MongoDB) → upload to OneDrive.
- * Accepts multipart with optional 'attachment' file field.
+ * STORAGE:
+ *   prod  → OneDrive: website/PI-Attachments/{piNumber}/
+ *   dev   → OneDrive: development/PI-Attachments/{piNumber}/
+ *   odvPath() handles the switch automatically.
  */
 router.post('/pi',
   uploadMem.single('attachment'),
@@ -536,14 +555,14 @@ router.post('/pi',
         });
       }
 
-      // ── Upload PI attachment to OneDrive/website/PI-Attachments/{piNumber}/ ──
+      // ── Upload PI attachment to OneDrive/{root}/PI-Attachments/{piNumber}/ ────
       let attachmentFileId = '', attachmentUrl = '', attachmentName = '', attachmentMime = '';
       if (req.file) {
         try {
           attachmentName = req.file.originalname || buildFilename(req.body.piNumber, '', req.file.mimetype);
           attachmentMime = req.file.mimetype;
           const upload   = await uploadToOneDrive(
-            ['website', 'PI-Attachments', req.body.piNumber],
+            odvPath('PI-Attachments', req.body.piNumber),  // ← env-aware
             attachmentName, req.file.buffer, req.file.mimetype
           );
           attachmentFileId = upload.fileId;
@@ -560,7 +579,7 @@ router.post('/pi',
         attachmentUrl,
         attachmentName,
         attachmentMime,
-        attachment:     undefined, // never store base64
+        attachment:            undefined, // never store base64
         attachmentMime_legacy: undefined,
       });
       pi.amountPaid = 0;
@@ -583,7 +602,9 @@ router.post('/pi',
 
 /**
  * PATCH /pi/:id
- * STORAGE CHANGE: supports optional new attachment upload.
+ * STORAGE:
+ *   prod  → OneDrive: website/PI-Attachments/{piNumber}/
+ *   dev   → OneDrive: development/PI-Attachments/{piNumber}/
  */
 router.patch('/pi/:id',
   uploadMem.single('attachment'),
@@ -598,7 +619,7 @@ router.patch('/pi/:id',
         try {
           const attachmentName = req.file.originalname || buildFilename(pi.piNumber, '', req.file.mimetype);
           const upload         = await uploadToOneDrive(
-            ['website', 'PI-Attachments', pi.piNumber],
+            odvPath('PI-Attachments', pi.piNumber),  // ← env-aware
             attachmentName, req.file.buffer, req.file.mimetype
           );
           pi.attachmentFileId = upload.fileId;
@@ -665,7 +686,7 @@ router.get('/payments', async (req, res) => {
 
 /**
  * GET /payments/:id/screenshot
- * NEW PROXY ROUTE — streams payment screenshot inline from OneDrive.
+ * PROXY ROUTE — streams payment screenshot inline from OneDrive.
  * Frontend: <img src="/api/payment-tracker/payments/:id/screenshot" />
  */
 router.get('/payments/:id/screenshot', async (req, res) => {
@@ -698,8 +719,10 @@ router.get('/payments/:id/screenshot', async (req, res) => {
 
 /**
  * POST /payments
- * STORAGE CHANGE: screenshot (was base64 in MongoDB) → upload to OneDrive.
- * Accepts multipart with optional 'screenshot' file field.
+ * STORAGE:
+ *   prod  → OneDrive: website/Payments/{paymentRef}/
+ *   dev   → OneDrive: development/Payments/{paymentRef}/
+ *   odvPath() handles the switch automatically.
  */
 router.post('/payments',
   uploadMem.single('screenshot'),
@@ -722,14 +745,14 @@ router.post('/payments',
       }
       if (!paymentRef) throw new Error('Could not generate a unique payment reference — please retry.');
 
-      // ── Upload screenshot to OneDrive/website/Payments/{paymentRef}/ ──────────
+      // ── Upload screenshot to OneDrive/{root}/Payments/{paymentRef}/ ────────────
       let screenshotFileId = '', screenshotUrl = '', screenshotName = '', screenshotMime = '';
       if (req.file) {
         try {
           screenshotName = req.file.originalname || buildFilename(paymentRef, '', req.file.mimetype);
           screenshotMime = req.file.mimetype;
           const upload   = await uploadToOneDrive(
-            ['website', 'Payments', paymentRef],
+            odvPath('Payments', paymentRef),  // ← env-aware
             screenshotName, req.file.buffer, req.file.mimetype
           );
           screenshotFileId = upload.fileId;

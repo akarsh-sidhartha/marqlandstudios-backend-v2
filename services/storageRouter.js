@@ -18,6 +18,21 @@
  * Set req.isInvoice = true before upload middleware on invoice routes.
  * Set req.r2Folder  = 'products'|'vendors'|'portal'|'publicApp'|'store'
  *   for explicit R2 subfolder (auto-detected from URL otherwise).
+ *
+ * DEV / PROD ISOLATION:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * All OneDrive paths are routed through odvPath() from utils/oneDrivePaths.
+ * In development (NODE_ENV !== 'production') every path lands under
+ * 'development/' instead of 'website/', keeping dev uploads fully sandboxed.
+ *
+ *   production  →  website/Invoices/{FY}/{Month}/
+ *   development →  development/Invoices/{FY}/{Month}/
+ *
+ *   production  →  website/uploads/videos/
+ *   development →  development/uploads/videos/
+ *
+ *   production  →  website/uploads/files/
+ *   development →  development/uploads/files/
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -25,6 +40,7 @@ const path  = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { uploadFile: uploadToR2, deleteFromR2 } = require('./r2Service');
 const { uploadSingleFileBuffer, getFinancialYear, getMonthName } = require('./msGraphService');
+const { odvPath } = require('../utils/oneDrivePaths');
 const logger = require('../utils/logger').child({ module: 'storageRouter' });
 
 /**
@@ -49,54 +65,68 @@ const routeFile = async (file, req) => {
   const isVideo    = mime.startsWith('video/');
   const isInvoice  = !!req.isInvoice;
 
-  // ── PDF → always OneDrive Invoices ─────────────────────────────────────────
+  // ── PDF / invoice image → OneDrive Invoices ─────────────────────────────────
+  // odvPath('Invoices', fy, month):
+  //   prod  → ['website',     'Invoices', '25-26', 'May']
+  //   dev   → ['development', 'Invoices', '25-26', 'May']
   if (isPdf || (isImage && isInvoice)) {
-    const fy       = getFinancialYear();                           // e.g. "25-26"
-    const month    = getMonthName(new Date());                     // e.g. "May"
-    const ext      = path.extname(file.originalname).toLowerCase() || (isPdf ? '.pdf' : '.jpg');
-    const filename = `${uuidv4()}${ext}`;
-    const folderPath = ['Invoices', fy, month];
+    const fy         = getFinancialYear();
+    const month      = getMonthName(new Date());
+    const ext        = path.extname(file.originalname).toLowerCase() || (isPdf ? '.pdf' : '.jpg');
+    const filename   = `${uuidv4()}${ext}`;
+    const folderPath = odvPath('Invoices', fy, month);  // ← env-aware
 
     const result = await uploadSingleFileBuffer(folderPath, filename, file.buffer, file.mimetype);
-    logger.info('File → OneDrive/Invoices', { filename, fy, month });
+    logger.info('File → OneDrive/Invoices', { filename, fy, month, folder: folderPath.join('/') });
     return {
       storage: 'onedrive',
       url:     result.webUrl,
-      key:     `Invoices/${fy}/${month}/${filename}`,  // readable path for logs
+      key:     `${folderPath.join('/')}/${filename}`,
       webUrl:  result.webUrl,
     };
   }
 
   // ── Regular image → R2 ─────────────────────────────────────────────────────
+  // R2 is already isolated per environment via bucket credentials — no path change needed.
   if (isImage) {
     const result = await uploadToR2(file, req);
     logger.info('File → R2', { key: result.key });
     return { storage: 'r2', url: result.url, key: result.key };
   }
 
-  // ── Video → OneDrive /uploads/videos/ ──────────────────────────────────────
+  // ── Video → OneDrive uploads/videos ────────────────────────────────────────
+  // odvPath('uploads', 'videos'):
+  //   prod  → ['website',     'uploads', 'videos']
+  //   dev   → ['development', 'uploads', 'videos']
   if (isVideo) {
     const ext      = path.extname(file.originalname).toLowerCase() || '.mp4';
     const filename = `${uuidv4()}${ext}`;
-    const result   = await uploadSingleFileBuffer(['uploads', 'videos'], filename, file.buffer, file.mimetype);
-    logger.info('File → OneDrive/uploads/videos', { filename });
+    const folderPath = odvPath('uploads', 'videos');  // ← env-aware
+
+    const result = await uploadSingleFileBuffer(folderPath, filename, file.buffer, file.mimetype);
+    logger.info('File → OneDrive/uploads/videos', { filename, folder: folderPath.join('/') });
     return {
       storage: 'onedrive',
       url:     result.webUrl,
-      key:     `uploads/videos/${filename}`,
+      key:     `${folderPath.join('/')}/${filename}`,
       webUrl:  result.webUrl,
     };
   }
 
-  // ── Everything else (doc, xls, zip…) → OneDrive /uploads/files/ ────────────
+  // ── Everything else (doc, xls, zip…) → OneDrive uploads/files ──────────────
+  // odvPath('uploads', 'files'):
+  //   prod  → ['website',     'uploads', 'files']
+  //   dev   → ['development', 'uploads', 'files']
   const ext      = path.extname(file.originalname).toLowerCase() || '.bin';
   const filename = `${uuidv4()}${ext}`;
-  const result   = await uploadSingleFileBuffer(['uploads', 'files'], filename, file.buffer, file.mimetype);
-  logger.info('File → OneDrive/uploads/files', { filename, mimetype: mime });
+  const folderPath = odvPath('uploads', 'files');  // ← env-aware
+
+  const result = await uploadSingleFileBuffer(folderPath, filename, file.buffer, file.mimetype);
+  logger.info('File → OneDrive/uploads/files', { filename, mimetype: mime, folder: folderPath.join('/') });
   return {
     storage: 'onedrive',
     url:     result.webUrl,
-    key:     `uploads/files/${filename}`,
+    key:     `${folderPath.join('/')}/${filename}`,
     webUrl:  result.webUrl,
   };
 };

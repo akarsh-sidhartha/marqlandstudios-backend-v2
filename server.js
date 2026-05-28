@@ -2,9 +2,6 @@ const dotenv = require('dotenv');
 //dotenv.config({ override: false });
 // ⚠ MUST call before any require that reads process.env
 dotenv.config();
-console.log('CLIENT_URL from env:', process.env.CLIENT_URL); // ← add temporarily
-console.log('CLIENT_URL from env:', process.env.ADMIN_URL); // ← add temporarily
-
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -24,40 +21,16 @@ const whatsappService = require('./services/whatsappService');
 const { startScheduler } = require('./services/trendingProductService');
 const { startTrackingScheduler } = require('./services/shipmentTrackingService');
 
-/**
- * ─── CORS CONFIGURATION ───────────────────────────────────────────────────────
- * DEV:  Allows localhost:3000 (admin portal) and localhost:3001 (public site)
- * PROD: Allows only the two live domains
- * Override by setting ALLOWED_ORIGINS as a comma-separated list in .env.
- */
-const defaultOrigins = IS_PRODUCTION
-  ? [
-    'https://admin.marqlandstudios.com',
-    'https://www.marqlandstudios.com',
-    'https://marqlandstudios.com',
-    // Legacy — keep during DNS transition; remove after cutover
-    'https://internalportal.marqland.com',
-    'https://www.marqland.com',
-    'https://marqland.com',
-  ]
-  : [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:5000',
-  ];
-
-/*
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-: defaultOrigins;
-*/
 const allowedOrigins = [
-  ...process.env.ADMIN_URL.split(',').map(o => o.trim()),
-  ...process.env.CLIENT_URL.split(',').map(o => o.trim()),
+  ...(process.env.ADMIN_URL ? process.env.ADMIN_URL.split(',').map(o => o.trim()) : []),
+  ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map(o => o.trim()) : []),
+  'https://marqlandstudios.com',
+  'https://www.marqlandstudios.com',
   'http://localhost:3000',
   'http://localhost:3001',
   'http://localhost:5000',
 ];
+
 app.use(cors({
   origin: (origin, callback) => {
     const normalised = origin?.replace(/\/$/, '');
@@ -149,8 +122,6 @@ app.use(activityLogger);
 // clients can load their portal, record views, send messages, etc.
 app.use('/api', (req, res, next) => {
   const PUBLIC_PATHS = [
-    '/public-site/store',       // ← public website store data
-    '/public-site/inquiry',     // ← public contact form POST
     '/portal/public/',      // GET portal data, POST view, POST message, PUT shortlist/calculator, GET shipments
     '/portal/push-subscribe',  // register browser push subscription (no auth needed)
     '/portal/vapid-public-key', // fetch VAPID key for push setup (no auth needed)
@@ -282,7 +253,7 @@ process.on('uncaughtException', (err) => {
 // ─── Server Startup ───────────────────────────────────────────────────────────
 //const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT,() => {
   console.log('SERVER STARTED ON PORT', PORT); // raw console, not logger
   logger.info('API server started', {
     env: IS_PRODUCTION ? 'production' : 'development',

@@ -16,18 +16,14 @@
  * to:
  *   website/orders/<client>/<fy>/<contact>/<ref>
  *
- * ONEDRIVE_ORDER_ROOT controls this — defaults to 'website/orders'.
- * Old root was 'Orders' (single segment, capital O).
+ * DEV / PROD ISOLATION:
+ * ─────────────────────────────────────────────────────────────────────────────
+ * When NODE_ENV !== 'production', all OneDrive paths are re-rooted under
+ * 'development' instead of 'website':
+ *   production  →  website/orders/<client>/...
+ *   development →  development/orders/<client>/...
  *
- * Two call sites updated:
- *   1. POST  / → buildOrderFolderHierarchy receives { ...req.body, folderRoot }
- *              so msGraphService uses the new root when building the hierarchy.
- *   2. DELETE /:id → deleteFolderByPath path array now starts with the two
- *              segments ['website', 'orders'] instead of ['Orders'].
- *
- * NOTE: If you have NOT yet updated msGraphService.buildOrderFolderHierarchy
- * to accept a `folderRoot` override, see the comment on the POST route below
- * for the fallback approach.
+ * This is handled centrally by utils/oneDrivePaths.js — no duplication here.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -49,15 +45,18 @@ const {
 } = require('../services/msGraphService');
 
 // ─── OneDrive path config ─────────────────────────────────────────────────────
-// Root segments for order folders in OneDrive.
-// Old value: 'Orders'  (single segment, capital O)
-// New value: 'website/orders'  → resolves to ['website', 'orders'] in path arrays
-//
-// Override via env var if needed:  ONEDRIVE_ORDER_ROOT=website/orders
-const ONEDRIVE_ORDER_ROOT = (process.env.ONEDRIVE_ORDER_ROOT || 'website/orders').replace(/^\/|\/$/g, '');
-// Split into segments for deleteFolderByPath (which takes an array):
-//   'website/orders'  →  ['website', 'orders']
-const ORDER_ROOT_SEGMENTS = ONEDRIVE_ORDER_ROOT.split('/');
+// Central helper: returns ['website', ...] in production, ['development', ...] in dev.
+const { odvPath, odvSegments } = require('../utils/oneDrivePaths');
+
+// Root segments for deleteFolderByPath (which takes an array).
+// prod  → ['website', 'orders']
+// dev   → ['development', 'orders']
+const ORDER_ROOT_SEGMENTS = odvSegments('orders');
+
+// String form for buildOrderFolderHierarchy's folderRoot param.
+// prod  → 'website/orders'
+// dev   → 'development/orders'
+const ORDER_FOLDER_ROOT = ORDER_ROOT_SEGMENTS.join('/');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,8 +69,9 @@ const genToken = () => {
   return Array.from(crypto.randomBytes(5)).map(b => chars[b % chars.length]).join('');
 };
 
-const makePortalSlug = (refOrId) => `${genToken()}-${slugify(String(refOrId))}`;
-
+//const makePortalSlug = (refOrId) => `${genToken()}-${slugify(String(refOrId))}`;
+const makePortalSlug = () => 
+  Array.from({length: 10}, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('');
 
 // ─── GET / — list all orders ──────────────────────────────────────────────────
 // FAST path: returns MongoDB data immediately — no OneDrive calls.
@@ -128,14 +128,14 @@ router.post('/', async (req, res) => {
     if (!clientName || !orderPlacedBy)
       return res.status(400).json({ error: 'Client Name and Contact Person are required.' });
 
-    // Create OneDrive folder — non-blocking on failure (order still saves)
-    // folderRoot overrides the hardcoded 'Orders' root inside msGraphService so
-    // new folders land at  website/orders/<client>/...  instead of  Orders/<client>/...
+    // Create OneDrive folder — non-blocking on failure (order still saves).
+    // ORDER_FOLDER_ROOT switches automatically between 'website/orders' (prod)
+    // and 'development/orders' (dev) via utils/oneDrivePaths.
     const folderLink = await (async () => {
       try {
         const { folderId, folderUrl } = await buildOrderFolderHierarchy({
           ...req.body,
-          folderRoot: ONEDRIVE_ORDER_ROOT,   // ← NEW: passes 'website/orders' to the service
+          folderRoot: ORDER_FOLDER_ROOT,   // ← env-aware: 'website/orders' or 'development/orders'
         });
         await uploadFiles(folderId, attachments);
         return folderUrl;
@@ -172,7 +172,8 @@ router.post('/', async (req, res) => {
 
     // Auto-create ClientPortal — non-fatal
     try {
-      const slug = makePortalSlug(order.refNumber || order._id);
+      //const slug = makePortalSlug(order.refNumber || order._id);
+      const slug = makePortalSlug();
       await ClientPortal.create({
         orderId:       order._id,
         slug,
@@ -252,7 +253,8 @@ router.delete('/:id', async (req, res) => {
     const order = await OrderInquiry.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found.' });
 
-    // Delete OneDrive folder — non-fatal
+    // Delete OneDrive folder — non-fatal.
+    // ORDER_ROOT_SEGMENTS is ['website','orders'] in prod, ['development','orders'] in dev.
     if (order.clientName && order.refNumber) {
       const orderDate = new Date(order.createdAt || order.updatedAt || new Date());
       const mo  = orderDate.getMonth() + 1;
@@ -261,7 +263,7 @@ router.delete('/:id', async (req, res) => {
       const fy  = mo >= 4 ? `${sh(y)}-${sh(y + 1)}` : `${sh(y - 1)}-${sh(y)}`;
 
       await deleteFolderByPath([
-        ...ORDER_ROOT_SEGMENTS,                          // ['website', 'orders']  (was ['Orders'])
+        ...ORDER_ROOT_SEGMENTS,                          // ['website','orders'] or ['development','orders']
         (order.clientName    || 'Unknown Client').trim(),
         fy,
         (order.orderPlacedBy || 'General').trim(),

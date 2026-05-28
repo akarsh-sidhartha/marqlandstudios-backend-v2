@@ -16,12 +16,20 @@
  *    base64Data is still received as a string (WhatsApp/Outlook pass it that way),
  *    so we convert to Buffer here before uploading — cleaner than base64 in transit.
  *
+ * 4. DEV / PROD ISOLATION:
+ *    saveExtractedInvoice now uses odvPath('Invoices', fy, month) so automated
+ *    invoice saves (WhatsApp, Outlook) land in the right sandbox folder:
+ *      production  →  ['website',     'Invoices', fy, month]
+ *      development →  ['development', 'Invoices', fy, month]
+ *    Consistent with the manual upload path in paymentTrackerRoutes.js.
+ *
  * Everything else — normalizeFY, fyFromDate, checkIfDuplicate, buildInvoiceFilename — unchanged.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const { Invoice } = require('../models/paymentTrackerModel');
 const { uploadSingleFileBuffer } = require('../services/msGraphService');
+const { odvPath } = require('./oneDrivePaths');  // ← env-aware path helper
 
 /** Pause for ms milliseconds */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -77,11 +85,12 @@ const buildInvoiceFilename = (vendorName, invoiceNumber, mimeType) => {
 
 /**
  * Save an AI-extracted invoice to the database.
- * Uploads file to OneDrive/website/Invoices/{FY}/{Month}/ first,
+ * Uploads file to OneDrive/{root}/Invoices/{FY}/{Month}/ first,
  * then saves only metadata + URL to MongoDB — no base64 in the DB.
  *
- * CHANGED: folder path now includes 'website' root.
- * CHANGED: uses uploadSingleFileBuffer (Buffer) instead of uploadSingleFile (base64).
+ * Root switches automatically based on NODE_ENV:
+ *   production  →  website/Invoices/{FY}/{Month}/
+ *   development →  development/Invoices/{FY}/{Month}/
  *
  * @param {object} extraction  - AI result from extractFromDocument()
  * @param {string} base64Data  - raw base64 string (no data URI prefix) — from WhatsApp/Outlook
@@ -97,7 +106,10 @@ const saveExtractedInvoice = async (extraction, base64Data, mimeType, source, me
   const fy    = normalizeFY(extraction.financialYear) || autoFY;
   const month = extraction.month || autoMonth;
 
-  // ── Upload to OneDrive/website/Invoices/{FY}/{Month}/ ──────────────────────
+  // ── Upload to OneDrive/{root}/Invoices/{FY}/{Month}/ ───────────────────────
+  // odvPath('Invoices', fy, month) resolves the root from NODE_ENV:
+  //   production  → ['website',     'Invoices', fy, month]
+  //   development → ['development', 'Invoices', fy, month]
   let oneDriveFileId = '';
   let oneDriveUrl    = '';
   let fileName       = '';
@@ -110,7 +122,7 @@ const saveExtractedInvoice = async (extraction, base64Data, mimeType, source, me
     const buffer = Buffer.from(pure, 'base64');
 
     const result = await uploadSingleFileBuffer(
-      ['website', 'Invoices', fy, month],   // ← was: ['Invoices', fy, month]
+      odvPath('Invoices', fy, month),   // ← env-aware (was hardcoded ['website', 'Invoices', fy, month])
       fileName,
       buffer,
       mimeType

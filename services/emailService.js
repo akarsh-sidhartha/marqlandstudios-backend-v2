@@ -233,14 +233,14 @@ const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there') =
  * @param {string} opts.portalUrl     - Full portal URL (e.g. "https://app.marqland.com/p/uk2al-inq-26-27-002")
  * @param {string} [opts.cc]          - Optional CC address (defaults to info@marqland.com)
  */
-const sendPortalEmail = async ({ toEmail, contactName, clientName, orderRef, title, portalUrl, cc }) => {
+const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, orderRef, title, portalUrl, cc }) => {
   const transporter = createTransporter();
   const ccAddress   = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
   const firstName   = (contactName || '').split(' ')[0] || 'there';
 
   await transporter.sendMail({
     from:    process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
-    to:      toEmail,
+    to:      clientEmail,
     cc:      ccAddress,   // ← always CC info@marqland.com
     subject: `Your Project Portal — ${orderRef}: ${title}`,
     html: `
