@@ -256,6 +256,7 @@ async function extractPdfPages(pdfPath) {
 
     imgSeq++;
     const seq = String(imgSeq).padStart(4, '0');
+    logger.debug('pdf-extract: decoding image', { seq, pageNum, label, w, h, filter: filter.slice(0, 40) });
 
     try {
       // ── DCTDecode → JPEG ─────────────────────────────────────────────────────
@@ -442,7 +443,10 @@ async function extractPdfPages(pdfPath) {
 }
 
 // ── PDF: Same category — process with AI, save as draft products ──────────────
-router.post('/pdf/same-category', adminOnly, (req, res, next) => {
+router.post('/pdf/same-category', adminOnly,
+  // Raise socket timeout — AI processing each image via Gemini adds ~10s per image
+  (req, res, next) => { req.socket.setTimeout(600_000); next(); },
+  (req, res, next) => {
   pdfUpload.single('pdf')(req, res, (err) => {
     if (err?.code === 'LIMIT_FILE_SIZE')
       return res.status(413).json({ message: 'PDF too large. Maximum allowed size is 200 MB.' });
@@ -503,7 +507,11 @@ router.post('/pdf/same-category', adminOnly, (req, res, next) => {
 });
 
 // ── PDF: Extract raw images only — download as ZIP, no AI ────────────────────
-router.post('/pdf/extract', adminOnly, (req, res, next) => {
+router.post('/pdf/extract', adminOnly,
+  // Raise socket timeout to 10 min — large PDFs (100+ images) can take several minutes
+  // to decompress and convert. Without this the TCP socket closes before we finish.
+  (req, res, next) => { req.socket.setTimeout(600_000); next(); },
+  (req, res, next) => {
   pdfUpload.single('pdf')(req, res, (err) => {
     if (err?.code === 'LIMIT_FILE_SIZE')
       return res.status(413).json({ message: 'PDF too large. Maximum allowed size is 200 MB.' });
