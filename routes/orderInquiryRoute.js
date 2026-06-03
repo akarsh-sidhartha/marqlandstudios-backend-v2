@@ -209,6 +209,9 @@ router.post('/', async (req, res) => {
       userId:     req.user?.id,
     });
 
+    // 1. Declare the slug variable in the upper scope
+    let createdSlug = null;
+
     // Auto-create ClientPortal — non-fatal
     try {
       //const slug = makePortalSlug(order.refNumber || order._id);
@@ -222,12 +225,21 @@ router.post('/', async (req, res) => {
         orderPlacedBy: order.orderPlacedBy || '',
         title:         order.title || '',
       });
+
+      // 2. Assign the slug to the outer variable if creation succeeds
+      createdSlug = slug;
       logger.debug('ClientPortal auto-created', { orderId: order._id, slug });
     } catch (portalErr) {
       logger.warn('ClientPortal auto-create skipped', { orderId: order._id, error: portalErr.message });
     }
 
-    res.status(201).json(order);
+    // 3. Return a combined response payload
+    const responsePayload = {
+      ...order.toObject(), // Converts Mongoose document to plain object
+      ...(createdSlug && { slug: createdSlug }) // Conditionally includes slug if it exists
+    };
+    res.status(201).json(responsePayload);
+    //res.status(201).json(order);
   } catch (err) {
     if (err.code === 11000) {
       logger.warn('Order creation blocked — duplicate ref number', { refNumber: req.body.refNumber });
@@ -254,6 +266,21 @@ router.patch('/:id', async (req, res) => {
           const newFolderName = updateData.refNumber.replace(/\//g, '-').trim();
           const newUrl = await renameItem(folderId, newFolderName).catch((e) => {
             logger.warn('OneDrive folder rename failed', { orderId: req.params.id, error: e.message });
+            return null;
+          });
+          if (newUrl) updateData.oneDriveFolderUrl = newUrl;
+        }
+
+        // Rename OneDrive folder to invoice number when order is marked completed.
+        // e.g. QT-26-27-0072 → INV-26-27-008
+        if (
+          updateData.status === 'completed' &&
+          updateData.invoiceNumber &&
+          updateData.invoiceNumber !== existing.invoiceNumber
+        ) {
+          const invoiceFolderName = updateData.invoiceNumber.replace(/\//g, '-').trim();
+          const newUrl = await renameItem(folderId, invoiceFolderName).catch((e) => {
+            logger.warn('OneDrive folder rename (invoice) failed', { orderId: req.params.id, error: e.message });
             return null;
           });
           if (newUrl) updateData.oneDriveFolderUrl = newUrl;

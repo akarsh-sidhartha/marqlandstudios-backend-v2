@@ -792,19 +792,22 @@ router.post('/payments',
       }
       if (!paymentRef) throw new Error('Could not generate a unique payment reference — please retry.');
 
-      // ── Upload screenshot to OneDrive/{root}/Payments/{paymentRef}/ ────────────
+      // ── Upload screenshot to OneDrive/{root}/Invoices/{FY}/{Month}/Payments/{paymentRef}/ ──
       let screenshotFileId = '', screenshotUrl = '', screenshotName = '', screenshotMime = '';
       if (req.file) {
         try {
           screenshotName = req.file.originalname || buildFilename(paymentRef, '', req.file.mimetype);
           screenshotMime = req.file.mimetype;
+          // Derive FY and month from paymentDate so the file lands alongside invoices for that period
+          const pd = paymentDate ? new Date(paymentDate) : new Date();
+          const { fy: payFy, month: payMonth } = fyFromDate(pd);
           const upload = await uploadToOneDrive(
-            odvPath('Payments', paymentRef),  // ← env-aware
+            odvPath('Invoices', payFy, payMonth, 'Payments'),  // ← nested under Invoices/{FY}/{Month}/Payments/
             screenshotName, req.file.buffer, req.file.mimetype
           );
           screenshotFileId = upload.fileId;
           screenshotUrl = upload.webUrl;
-          logger.debug('Payment screenshot uploaded to OneDrive', { paymentRef, screenshotUrl });
+          logger.debug('Payment screenshot uploaded to OneDrive', { paymentRef, screenshotUrl, path: `Invoices/${payFy}/${payMonth}/Payments` });
         } catch (e) {
           logger.warn('Payment screenshot OneDrive upload failed — recording payment without screenshot', { error: e.message });
         }

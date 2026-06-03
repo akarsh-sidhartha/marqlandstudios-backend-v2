@@ -567,8 +567,9 @@ router.delete('/:slug', async (req, res) => {
 
 /** POST /api/portal/send-email (UNCHANGED) */
 router.post('/send-email', async (req, res) => {
-  try {
     const { slug, clientEmail, contactName, clientName, orderRef, title, cc } = req.body;
+    
+  try {
     if (!clientEmail) return res.status(400).json({ message: 'clientEmail required.' });
     if (!slug)        return res.status(400).json({ message: 'slug required.' });
 
