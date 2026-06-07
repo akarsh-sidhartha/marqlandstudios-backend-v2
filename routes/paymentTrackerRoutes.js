@@ -581,13 +581,13 @@ router.post('/pi',
             attachmentName, req.file.buffer, req.file.mimetype
           );
           attachmentFileId = upload.fileId;
-          attachmentUrl    = upload.webUrl;
+          attachmentUrl = upload.webUrl;
           logger.info('PI attachment uploaded to OneDrive', { piNumber: req.body.piNumber, safePiFolder, attachmentUrl });
         } catch (e) {
           // Keep name/mime blank so the record doesn't appear to have an attachment
-          attachmentName   = '';
-          attachmentMime   = '';
-          oneDriveWarning  = e.message;
+          attachmentName = '';
+          attachmentMime = '';
+          oneDriveWarning = e.message;
           logger.error('PI OneDrive upload failed', { error: e.message, stack: e.stack, piNumber: req.body.piNumber, safePiFolder });
         }
       }
@@ -796,6 +796,49 @@ router.post('/payments',
       let screenshotFileId = '', screenshotUrl = '', screenshotName = '', screenshotMime = '';
       if (req.file) {
         try {
+          let vendorName = '';
+          if (vendor) {
+            const vDoc = await Vendor.findById(vendor).select('companyName').lean();
+            if (vDoc) vendorName = vDoc.companyName;
+          }
+          const ext = req.file.mimetype === 'application/pdf' ? 'pdf'
+            : req.file.mimetype?.startsWith('image/') ? req.file.mimetype.split('/')[1].replace('jpeg', 'jpg')
+              : 'bin';
+
+          const cleanVendor = vendorName.replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'UnknownVendor';
+          const cleanPaymentRef = paymentRef.replace(/[^a-z0-9_\-]/gi, '_');
+
+          // 4. Dynamically craft the contextual filename based on mapping type
+          if (mappedTo === 'proforma_invoice' && piId) {
+            const pi = await ProformaInvoice.findById(piId).select('piNumber').lean();
+            const cleanPi = (pi?.piNumber || 'PI').replace(/[^a-z0-9_\-]/gi, '_');
+            screenshotName = `${cleanVendor}_${cleanPi}_${cleanPaymentRef}.${ext}`;
+
+          } else if (mappedTo === 'vendor_invoice' && viId) {
+            const vi = await Invoice.findById(viId).select('invoice_number').lean();
+            const cleanInv = (vi?.invoice_number || 'INV').replace(/[^a-z0-9_\-]/gi, '_');
+            screenshotName = `${cleanVendor}_${cleanInv}_${cleanPaymentRef}.${ext}`;
+
+          } else {
+            // Default: 'advance' or unmapped fallback
+            // Generates: VendorName_RANDOMNUMBER_PAY-XXXXX.ext
+            const randomNum = Math.floor(1000 + Math.random() * 9000); // 4-digit unique numerical string
+            screenshotName = `${cleanVendor}_${randomNum}_${cleanPaymentRef}.${ext}`;
+          }
+
+          screenshotMime = req.file.mimetype;
+          const pd = paymentDate ? new Date(paymentDate) : new Date();
+          const { fy: payFy, month: payMonth } = fyFromDate(pd);
+
+          const upload = await uploadToOneDrive(
+            odvPath('Invoices', payFy, payMonth, 'Payments'),  // ← nested under Invoices/{FY}/{Month}/Payments/
+            screenshotName, req.file.buffer, req.file.mimetype
+          );
+          /*
+          // Derive FY and month from paymentDate so the file lands alongside invoices for that period
+          const pd = paymentDate ? new Date(paymentDate) : new Date();
+          const { fy: payFy, month: payMonth } = fyFromDate(pd);
+
           screenshotName = req.file.originalname || buildFilename(paymentRef, '', req.file.mimetype);
           screenshotMime = req.file.mimetype;
           // Derive FY and month from paymentDate so the file lands alongside invoices for that period
@@ -805,14 +848,18 @@ router.post('/payments',
             odvPath('Invoices', payFy, payMonth, 'Payments'),  // ← nested under Invoices/{FY}/{Month}/Payments/
             screenshotName, req.file.buffer, req.file.mimetype
           );
+          */
+
           screenshotFileId = upload.fileId;
           screenshotUrl = upload.webUrl;
+          console.log('Payment screenshot uploaded to OneDrive', { paymentRef, screenshotUrl, path: `Invoices/${payFy}/${payMonth}/Payments` });
           logger.debug('Payment screenshot uploaded to OneDrive', { paymentRef, screenshotUrl, path: `Invoices/${payFy}/${payMonth}/Payments` });
         } catch (e) {
           logger.warn('Payment screenshot OneDrive upload failed — recording payment without screenshot', { error: e.message });
         }
       } else if (req.body.screenshot) {
         // Legacy base64 path — still works but not stored in MongoDB
+        console.log('Payment received base64 screenshot — ignoring. Send as multipart instead.');
         logger.warn('Payment received base64 screenshot — ignoring. Send as multipart instead.');
       }
 

@@ -37,6 +37,7 @@ const Shipment     = require('../models/Shipment');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
 const upload       = require('../middleware/upload');          // ← NEW
 const logger       = require('../utils/logger').child({ module: 'clientPortalRoutes' });
+const { sendPortalEmail } = require('../services/emailService');
 
 // ── Web Push setup (UNCHANGED) ────────────────────────────────────────────────
 let webpush = null;
@@ -66,6 +67,7 @@ const pushSubSchema = new mongoose.Schema({
 const PushSubscription = mongoose.models.PushSubscription
   || mongoose.model('PushSubscription', pushSubSchema);
 
+  /*
 // ── Email transporter (UNCHANGED) ────────────────────────────────────────────
 const buildTransporter = () => {
   const isGmail = process.env.EMAIL_SERVICE === 'gmail';
@@ -83,6 +85,7 @@ const buildTransporter = () => {
         tls: { rejectUnauthorized: false },
       });
 };
+*/
 
 // ─── Helpers (UNCHANGED) ─────────────────────────────────────────────────────
 
@@ -574,10 +577,21 @@ router.post('/send-email', async (req, res) => {
     if (!slug)        return res.status(400).json({ message: 'slug required.' });
 
     const appUrl     = (process.env.CLIENT_URL || 'http://localhost:3000').replace(/\/$/, '');
-    const url        = `${appUrl}/p/${slug}`;
+    const portalUrl        = `${appUrl}/p/${slug}`;
     const greetName  = contactName || clientName || 'there';
     const ccAddress  = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
-
+    // Use the centralized service wrapper
+    await sendPortalEmail({
+      slug,
+      clientEmail,
+      contactName,
+      clientName,
+      orderRef,
+      title,
+      portalUrl,
+      cc
+    });
+/*
     await buildTransporter().sendMail({
       from:    process.env.EMAIL_FROM || `Marqland Studios <${process.env.EMAIL_USER}>`,
       to:      clientEmail,
@@ -623,10 +637,10 @@ router.post('/send-email', async (req, res) => {
 </body>
 </html>`,
     });
-
+*/
     await ClientPortal.findOneAndUpdate({ slug }, { $set: { clientEmail } });
-    logger.info('Portal email sent', { to: clientEmail, slug, orderRef, url });
-    res.json({ ok: true, sentTo: clientEmail, url });
+    logger.info('Portal email sent', { to: clientEmail, slug, orderRef, portalUrl });
+    res.json({ ok: true, sentTo: clientEmail, portalUrl });
   } catch (err) {
     logger.error('Portal send-email failed', { slug, clientEmail, error: err.message });
     res.status(500).json({ message: err.message });

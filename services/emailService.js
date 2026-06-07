@@ -77,12 +77,12 @@ const verifyEmailConfig = async () => {
  */
 const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland Admin') => {
   const transporter = createTransporter();
-  const appUrl      = process.env.ADMIN_URL || 'http://localhost:3000';
-  const inviteLink  = `${appUrl}/#/invite?token=${inviteToken}`;
+  const appUrl = process.env.ADMIN_URL || 'http://localhost:3000';
+  const inviteLink = `${appUrl}/#/invite?token=${inviteToken}`;
 
   await transporter.sendMail({
-    from:    process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
-    to:      toEmail,
+    from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
+    to: toEmail,
     subject: `You've been invited to Marqland Internal Portal`,
     html: `
 <!DOCTYPE html>
@@ -154,12 +154,12 @@ const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland
  */
 const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there') => {
   const transporter = createTransporter();
-  const appUrl      = process.env.ADMIN_URL || 'http://localhost:3000';
-  const resetLink   = `${appUrl}/#/?reset=${resetToken}`;
+  const appUrl = process.env.ADMIN_URL || 'http://localhost:3000';
+  const resetLink = `${appUrl}/#/?reset=${resetToken}`;
 
   await transporter.sendMail({
-    from:    process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
-    to:      toEmail,
+    from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
+    to: toEmail,
     subject: 'Reset your Marqland Portal password',
     html: `
 <!DOCTYPE html>
@@ -235,13 +235,13 @@ const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there') =
  */
 const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, orderRef, title, portalUrl, cc }) => {
   const transporter = createTransporter();
-  const ccAddress   = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
-  const firstName   = (contactName || '').split(' ')[0] || 'there';
+  const ccAddress = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
+  const firstName = (contactName || '').split(' ')[0] || 'there';
 
   await transporter.sendMail({
-    from:    process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
-    to:      clientEmail,
-    cc:      ccAddress,   // ← always CC info@marqland.com
+    from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
+    to: clientEmail,
+    cc: ccAddress,   // ← always CC info@marqland.com
     subject: `Your Project Portal — ${orderRef}: ${title}`,
     html: `
 <!DOCTYPE html>
@@ -249,109 +249,121 @@ const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, ord
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Project Curated Successfully</title>
 </head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px;">
-    <tr><td align="center">
-      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+<body style="margin:0;padding:0;background-color:#faf8f5;font-family:'Manrope', 'Segoe UI', system-ui, sans-serif;color:#1a1a1a;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px;background-color:#faf8f5;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border:1px solid rgba(0,0,0,0.06);border-radius:0px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.05);">
 
-        <!-- Header -->
-        <tr>
-          <td style="background:#0f172a;padding:28px 40px;">
-            <table cellpadding="0" cellspacing="0"><tr>
-              <td style="background:#6366f1;width:36px;height:36px;border-radius:8px;text-align:center;vertical-align:middle;">
-                <span style="color:#fff;font-size:18px;font-weight:900;">▦</span>
-              </td>
-              <td style="padding-left:12px;color:#ffffff;font-size:20px;font-weight:800;letter-spacing:-0.02em;text-transform:uppercase;">Marqland</td>
-            </tr></table>
-          </td>
-        </tr>
+          <!-- Premium Navy Header Bar -->
+          <tr>
+            <td style="background-color:#0e1520;padding:32px 40px;border-bottom:1px solid rgba(255,255,255,0.05);">
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td width="28" style="background-color:#b8975a;width:28px;height:28px;border-radius:6px;text-align:center;vertical-align:middle;font-family:'Jost',sans-serif;font-weight:900;color:#0e1520;font-size:13px;">
+                    M
+                  </td>
+                  <td style="padding-left:12px;color:#ffffff;font-size:16px;font-weight:400;font-family:'Jost', sans-serif;letter-spacing:0.2em;text-transform:uppercase;">
+                    Marqland Studios
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-        <!-- Ref badge -->
-        <tr>
-          <td style="background:#6366f1;padding:10px 40px;">
-            <span style="color:#c7d2fe;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;">Reference</span>
-            &nbsp;
-            <span style="color:#ffffff;font-size:13px;font-weight:800;letter-spacing:0.04em;">${orderRef}</span>
-          </td>
-        </tr>
+          <!-- Tonal Reference Bar Section -->
+          <tr>
+            <td style="background-color:#f2efe9;padding:12px 40px;border-bottom:1px solid rgba(0,0,0,0.05);">
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td>
+                    <span style="color:rgba(26,26,26,0.4);font-family:'Jost',sans-serif;font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.25em;">Reference</span>
+                    &nbsp;&nbsp;
+                    <span style="color:#b8975a;font-family:'Jost',sans-serif;font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;">${orderRef}</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
 
-        <!-- Body -->
-        <tr>
-          <td style="padding:36px 40px 28px;">
-            <h1 style="margin:0 0 6px;font-size:22px;font-weight:800;color:#1e293b;line-height:1.3;">
-              Hi ${firstName},
-            </h1>
-            <p style="margin:0 0 6px;font-size:15px;color:#64748b;line-height:1.6;">
-              Your project <strong style="color:#1e293b;">${title}</strong> has been received by <strong>Marqland</strong>.
-            </p>
-            <p style="margin:0 0 28px;font-size:15px;color:#64748b;line-height:1.6;">
-              Use your private portal to track progress, review updates, and communicate with our team.
-            </p>
+          <!-- Main Body Copy Section -->
+          <tr>
+            <td style="padding:44px 40px 32px;">
+              <h1 style="margin:0 0 16px;font-family:'Cormorant Garamond', Georgia, serif;font-size:28px;font-weight:300;color:#1a1a1a;line-height:1.2;">
+                Curated for <span style="color:#b8975a;font-style:italic;">${firstName},</span>
+              </h1>
+              <p style="margin:0 0 14px;font-size:14px;color:rgba(26,26,26,0.65);line-height:1.75;font-weight:400;">
+                Your project <strong style="color:#1a1a1a;font-weight:600;">${title}</strong> has been curated by our project team.
+              </p>
+              <p style="margin:0 0 36px;font-size:14px;color:rgba(26,26,26,0.65);line-height:1.75;font-weight:400;">
+                Your tailored digital concierge workspace is online. Use this portal to review options, interact live on our message boards and track dispatch milestones seamlessly.
+              </p>
 
-            <!-- CTA button -->
-            <table cellpadding="0" cellspacing="0" style="margin:0 0 32px;">
-              <tr>
-                <td style="background:#6366f1;border-radius:10px;">
-                  <a href="${portalUrl}"
-                     style="display:inline-block;padding:15px 36px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;letter-spacing:0.01em;">
-                    View My Project Portal →
-                  </a>
-                </td>
-              </tr>
-            </table>
+              <!-- Luxury Gold CTA Button -->
+              <table cellpadding="0" cellspacing="0" style="margin:0 0 40px;">
+                <tr>
+                  <td style="background-color:#b8975a;border-radius:0px;">
+                    <a href="${portalUrl}"
+                       style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg, #d4b06a, #b8975a);color:#0e1520;text-decoration:none;font-family:'Jost',sans-serif;font-size:10px;font-weight:500;letter-spacing:0.25em;text-transform:uppercase;box-shadow:0 4px 16px rgba(184,151,90,0.25);">
+                      Open Project Workspace →
+                    </a>
+                  </td>
+                </tr>
+              </table>
 
-            <!-- Info box -->
-            <table cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;width:100%;margin-bottom:28px;">
-              <tr>
-                <td style="padding:18px 20px;">
-                  <table cellpadding="0" cellspacing="0" width="100%">
-                    <tr>
-                      <td style="font-size:11px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;padding-bottom:10px;">
-                        Project Details
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style="font-size:13px;color:#475569;padding-bottom:6px;">
-                        <strong style="color:#1e293b;">Client:</strong> &nbsp;${clientName}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style="font-size:13px;color:#475569;padding-bottom:6px;">
-                        <strong style="color:#1e293b;">Contact:</strong> &nbsp;${contactName}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td style="font-size:13px;color:#475569;">
-                        <strong style="color:#1e293b;">Project:</strong> &nbsp;${title}
-                      </td>
-                    </tr>
-                  </table>
-                </td>
-              </tr>
-            </table>
+              <!-- Minimal Layered Info Box Section -->
+              <table cellpadding="0" cellspacing="0" style="background-color:#fff;border:1px solid rgba(0,0,0,0.07);width:100%;margin-bottom:32px;">
+                <tr>
+                  <td style="padding:20px 24px;">
+                    <table cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="font-family:'Jost',sans-serif;font-size:9px;font-weight:500;color:rgba(26,26,26,0.4);text-transform:uppercase;letter-spacing:0.2em;padding-bottom:14px;">
+                          Project Overview
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="font-family:'Jost',sans-serif;font-size:13px;color:#1a1a1a;padding-bottom:8px;font-weight:400;">
+                          <span style="color:rgba(26,26,26,0.45);">Client:</span> &nbsp;${clientName}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="font-family:'Jost',sans-serif;font-size:13px;color:#1a1a1a;padding-bottom:8px;font-weight:400;">
+                          <span style="color:rgba(26,26,26,0.45);">Concierge Liaison:</span> &nbsp;${contactName}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="font-family:'Jost',sans-serif;font-size:13px;color:#1a1a1a;font-weight:400;">
+                          <span style="color:rgba(26,26,26,0.45);">Assignment Focus:</span> &nbsp;<span style="color:#b8975a;font-weight:500;">${title}</span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
 
-            <!-- Fallback link -->
-            <p style="font-size:12px;color:#94a3b8;line-height:1.6;margin:0;">
-              If the button doesn't work, copy this link into your browser:<br/>
-              <a href="${portalUrl}" style="color:#6366f1;word-break:break-all;">${portalUrl}</a>
-            </p>
-          </td>
-        </tr>
+              <!-- Fallback Token Link Footer Block -->
+              <p style="font-family:'Jost',sans-serif;font-size:11px;color:rgba(26,26,26,0.4);line-height:1.6;margin:0;font-weight:300;letter-spacing:0.02em;">
+                If your client doesn't resolve the button correctly, access securely via your browser:<br/>
+                <a href="${portalUrl}" style="color:#b8975a;word-break:break-all;text-decoration:none;font-weight:400;">${portalUrl}</a>
+              </p>
+            </td>
+          </tr>
 
-        <!-- Footer -->
-        <tr>
-          <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:18px 40px;">
-            <p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.5;">
-              This email was sent by Marqland on behalf of your project team.
-              If you weren't expecting this, please contact us at
-              <a href="mailto:info@marqland.com" style="color:#6366f1;">info@marqland.com</a>.
-            </p>
-          </td>
-        </tr>
+          <!-- Tonal Studio Footer -->
+          <tr>
+            <td style="background-color:#ffffff;border-top:1px solid rgba(0,0,0,0.06);padding:24px 40px;text-align:center;">
+              <p style="margin:0;font-family:'Jost',sans-serif;font-size:11px;color:rgba(26,26,26,0.4);line-height:1.6;letter-spacing:0.03em;">
+                This secure distribution update was processed automatically by Marqland Studios.<br/>
+                Confidentiality Notice: This document contains proprietary client content. If encountered unexpectedly, please notify <a href="mailto:info@marqland.com" style="color:#b8975a;text-decoration:none;">info@marqland.com</a>.
+              </p>
+            </td>
+          </tr>
 
-      </table>
-    </td></tr>
+        </table>
+      </td>
+    </tr>
   </table>
 </body>
 </html>`,
