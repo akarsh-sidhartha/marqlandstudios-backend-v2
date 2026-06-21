@@ -44,6 +44,30 @@ const productItemSchema = new mongoose.Schema({
   subCategory:      { type: String, default: '' },
   note:             { type: String, default: '' },
   order:            { type: Number, default: 0 },
+
+  // ── Combo Creator metadata ──────────────────────────────────────────────────
+  // A combo is a productItems entry like any other (category: 'Combo',
+  // productId: ''), with this extra metadata attached so it can be deduped
+  // and so its components stay denormalized even if the source Products
+  // are later edited or deleted.
+  isCombo:          { type: Boolean, default: false },
+  // Matches productId's String convention above — not an ObjectId ref.
+  comboProductIds:  { type: [String], default: [] },
+  // Sorted comboProductIds joined with '|' — dedupe key, see clientPortalRoutes.js
+  comboSignature:   { type: String, default: '' },
+  comboComponents: {
+    type: [{
+      productId:   String,
+      name:        String,
+      imageUrl:    String,
+      price:       Number,
+      // Snapshotted at publish time, same denormalization rationale as the
+      // other comboComponents fields — shown when a client clicks that
+      // component's thumbnail in the combo's image gallery.
+      description: String,
+    }],
+    default: [],
+  },
 }, { _id: true });
 
 // ── Offsite item (property) ────────────────────────────────────────────────────
