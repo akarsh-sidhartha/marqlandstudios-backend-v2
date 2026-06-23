@@ -3,58 +3,58 @@
  * backend/routes/productRoutes.js
  * Mounted at /api/products
  *
- *   GET    /meta                  — distinct brands, categories, subCategories
- *   GET    /                      — list all products
- *   GET    /:id                   — single product
- *   POST   /                      — create product (with optional image upload + background AI processing)
- *   PUT    /:id                   — update product (with optional image upload + background AI processing)
- *   DELETE /:id                   — delete product + image file
+ * GET    /meta                  — distinct brands, categories, subCategories
+ * GET    /                      — list all products
+ * GET    /:id                   — single product
+ * POST   /                      — create product (with optional image upload + background AI processing)
+ * PUT    /:id                   — update product (with optional image upload + background AI processing)
+ * DELETE /:id                   — delete product + image file
  *
  * Image gallery:
- *   POST   /:id/image-search      — Serper reverse image search
- *   POST   /:id/save-images       — download & persist selected URLs to gallery
- *   POST   /:id/upload-images     — direct multi-file upload to gallery
- *   DELETE /:id/images/:index     — remove one gallery image
- *   PUT    /:id/primary-image/:index — promote gallery image to primary
- *   PUT    /:id/video             — save video URL
+ * POST   /:id/image-search      — Serper reverse image search
+ * POST   /:id/save-images       — download & persist selected URLs to gallery
+ * POST   /:id/upload-images     — direct multi-file upload to gallery
+ * DELETE /:id/images/:index     — remove one gallery image
+ * PUT    /:id/primary-image/:index — promote gallery image to primary
+ * PUT    /:id/video             — save video URL
  *
  * Portal:
- *   POST   /upload-temp-image     — upload image for portal discussion items (no Product doc)
+ * POST   /upload-temp-image     — upload image for portal discussion items (no Product doc)
  *
  * Combo Creator (stateless — see clientPortalRoutes.js for the persisted publish step):
- *   POST   /combos/generate       — price-match candidate combos across selected categories
+ * POST   /combos/generate       — price-match candidate combos across selected categories
  */
 
 const express = require('express');
 console.log('express loaded from ProductRoutes OK');
-const router  = express.Router();
+const router = express.Router();
 console.log('router loaded from ProductRoutes OK');
-const fs      = require('fs');
+const fs = require('fs');
 console.log('fs loaded from ProductRoutes OK');
-const path    = require('path');
+const path = require('path');
 console.log('path loaded from ProductRoutes OK');
-const multer  = require('multer');
+const multer = require('multer');
 console.log('multer loaded from ProductRoutes OK');
-const axios   = require('axios');
+const axios = require('axios');
 console.log('axios loaded from ProductRoutes OK');
-const sharp   = require('sharp');
+const sharp = require('sharp');
 console.log('sharp loaded from ProductRoutes OK');
 
-const Product      = require('../models/Product');
+const Product = require('../models/Product');
 console.log('Product loaded from ProductRoutes OK');
-const ImagePrompt  = require('../models/ImagePrompt');
+const ImagePrompt = require('../models/ImagePrompt');
 console.log('ImagePrompt loaded from ProductRoutes OK');
 const { processProductImage } = require('../services/imageProcessingService');
 console.log('processProductImage loaded from ProductRoutes OK');
 const { generateCombos } = require('../services/comboEngine');
 console.log('generateCombos loaded from ProductRoutes OK');
-const logger       = require('../utils/logger').child({ module: 'productRoutes' });
+const logger = require('../utils/logger').child({ module: 'productRoutes' });
 console.log('logger loaded from ProductRoutes OK');
 
 // ─── Upload directory helpers ─────────────────────────────────────────────────
 
 const INTERNAL_PRODUCTS_BASE = path.join(process.cwd(), 'public', 'uploads', 'internalApp', 'products');
-console.log('INTERNAL_PRODUCTS_BASE value = '+INTERNAL_PRODUCTS_BASE);
+console.log('INTERNAL_PRODUCTS_BASE value = ' + INTERNAL_PRODUCTS_BASE);
 
 const safeCategoryName = (category) =>
   (category || 'uncategorised').trim()
@@ -73,9 +73,9 @@ const getCategoryUrl = (category, filename) =>
 // ─── Image gallery helper — download remote URL → WebP → disk ─────────────────
 async function downloadAndSave(remoteUrl, category) {
   const res = await axios.get(remoteUrl, {
-    responseType:     'arraybuffer',
-    timeout:          15_000,
-    headers:          { 'User-Agent': 'Mozilla/5.0 (compatible; ProductGalleryBot/1.0)', Accept: 'image/*,*/*' },
+    responseType: 'arraybuffer',
+    timeout: 15_000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ProductGalleryBot/1.0)', Accept: 'image/*,*/*' },
     maxContentLength: 10 * 1024 * 1024,
   });
   const contentType = res.headers['content-type'] || '';
@@ -85,7 +85,7 @@ async function downloadAndSave(remoteUrl, category) {
     .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
     .webp({ quality: 88 })
     .toBuffer();
-  const filename    = `gallery-${Date.now()}-${Math.round(Math.random() * 1e6)}.webp`;
+  const filename = `gallery-${Date.now()}-${Math.round(Math.random() * 1e6)}.webp`;
   fs.writeFileSync(path.join(getCategoryDir(category), filename), processed);
   return getCategoryUrl(category, filename);
 }
@@ -105,10 +105,15 @@ async function resolvePrompt(promptText, promptId, category) {
 }
 
 // ─── Multer configuration ─────────────────────────────────────────────────────
-// Destination reads req.body.category so files go straight into the right subfolder.
+// Save directly to the base products folder first to prevent early parsing undefined bugs.
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, getCategoryDir(req.body.category)),
-  filename:    (req, file, cb) => {
+  destination: (req, file, cb) => {
+    if (!fs.existsSync(INTERNAL_PRODUCTS_BASE)) {
+      fs.mkdirSync(INTERNAL_PRODUCTS_BASE, { recursive: true });
+    }
+    cb(null, INTERNAL_PRODUCTS_BASE);
+  },
+  filename: (req, file, cb) => {
     const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     cb(null, `${file.fieldname}-${unique}${path.extname(file.originalname)}`);
   },
@@ -186,15 +191,24 @@ router.get('/:id', async (req, res) => {
 router.post('/', upload.single('image'), async (req, res) => {
   try {
     const category = req.body.category || 'uncategorised';
+
+    // Safely move file from base temp upload directory into the final category directory
+    if (req.file) {
+      const targetDir = getCategoryDir(category);
+      const targetPath = path.join(targetDir, req.file.filename);
+      fs.renameSync(req.file.path, targetPath);
+      req.file.path = targetPath; // update reference path
+    }
+
     const imageUrl = req.file ? getCategoryUrl(category, req.file.filename) : '';
-    const product  = new Product({ ...req.body, imageUrl });
+    const product = new Product({ ...req.body, imageUrl });
     await product.save();
 
     logger.info('Product created', {
       productId: product._id,
-      name:      product.name,
+      name: product.name,
       category,
-      userId:    req.user?.id,
+      userId: req.user?.id,
     });
 
     // Respond before AI processing — client should never wait for this
@@ -204,8 +218,8 @@ router.post('/', upload.single('image'), async (req, res) => {
       setImmediate(async () => {
         try {
           const finalPrompt = await resolvePrompt(req.body.promptText, req.body.promptId, category);
-          const inputBuf    = fs.readFileSync(path.join(process.cwd(), 'public', imageUrl));
-          const processed   = await processProductImage(inputBuf, { category, promptText: finalPrompt });
+          const inputBuf = fs.readFileSync(path.join(process.cwd(), 'public', imageUrl));
+          const processed = await processProductImage(inputBuf, { category, promptText: finalPrompt });
           const procFilename = req.file.filename.replace(/\.[^.]+$/, '-proc.webp');
           fs.writeFileSync(path.join(getCategoryDir(category), procFilename), processed);
           const procUrl = getCategoryUrl(category, procFilename);
@@ -234,16 +248,22 @@ router.put('/:id', upload.single('image'), async (req, res) => {
     const category = req.body.category || existing.category || 'uncategorised';
 
     const updateData = {
-      name:          req.body.name          || existing.name,
-      description:   req.body.description   || existing.description,
-      brand:         req.body.brand         || existing.brand,
+      name: req.body.name || existing.name,
+      description: req.body.description || existing.description,
+      brand: req.body.brand || existing.brand,
       category,
-      subCategory:   req.body.subCategory   || existing.subCategory,
-      markupPercent: req.body.markupPercent  !== undefined ? Number(req.body.markupPercent)  : existing.markupPercent,
-      purchasePrice: req.body.purchasePrice  !== undefined ? Number(req.body.purchasePrice)  : existing.purchasePrice,
+      subCategory: req.body.subCategory || existing.subCategory,
+      markupPercent: req.body.markupPercent !== undefined ? Number(req.body.markupPercent) : existing.markupPercent,
+      purchasePrice: req.body.purchasePrice !== undefined ? Number(req.body.purchasePrice) : existing.purchasePrice,
     };
 
     if (req.file) {
+      // Safely move file from base temp upload directory into the final category directory
+      const targetDir = getCategoryDir(category);
+      const targetPath = path.join(targetDir, req.file.filename);
+      fs.renameSync(req.file.path, targetPath);
+      req.file.path = targetPath; // update reference path
+
       updateData.imageUrl = getCategoryUrl(category, req.file.filename);
       // Delete old image file — non-fatal if it fails
       if (existing.imageUrl) {
@@ -266,8 +286,8 @@ router.put('/:id', upload.single('image'), async (req, res) => {
       setImmediate(async () => {
         try {
           const finalPrompt = await resolvePrompt(req.body.promptText, req.body.promptId, category);
-          const inputBuf    = fs.readFileSync(path.join(process.cwd(), 'public', updateData.imageUrl));
-          const processed   = await processProductImage(inputBuf, { category, promptText: finalPrompt });
+          const inputBuf = fs.readFileSync(path.join(process.cwd(), 'public', updateData.imageUrl));
+          const processed = await processProductImage(inputBuf, { category, promptText: finalPrompt });
           const procFilename = req.file.filename.replace(/\.[^.]+$/, '-proc.webp');
           fs.writeFileSync(path.join(getCategoryDir(category), procFilename), processed);
           const procUrl = getCategoryUrl(category, procFilename);
@@ -334,19 +354,19 @@ router.post('/:id/image-search', async (req, res) => {
     const results = (serperRes.data?.images || [])
       .filter(img => img.imageUrl?.startsWith('http'))
       .map(img => ({
-        url:       img.imageUrl,
+        url: img.imageUrl,
         thumbnail: img.thumbnailUrl || img.imageUrl,
-        source:    img.source || img.link || '',
-        title:     img.title  || '',
-        width:     img.imageWidth  || null,
-        height:    img.imageHeight || null,
+        source: img.source || img.link || '',
+        title: img.title || '',
+        width: img.imageWidth || null,
+        height: img.imageHeight || null,
       }));
 
     logger.debug('Image search complete', { productId: req.params.id, query, results: results.length });
     res.json({ query, results });
   } catch (err) {
-    const status     = err.response?.status;
-    const serperMsg  = err.response?.data?.message || err.message;
+    const status = err.response?.status;
+    const serperMsg = err.response?.data?.message || err.message;
     logger.error('Serper image search failed', { productId: req.params.id, status, error: serperMsg });
     if (status === 401 || status === 403) {
       return res.status(503).json({ message: `Serper API key rejected (${status}). Check SERPER_API_KEY in .env.` });
@@ -367,7 +387,7 @@ router.post('/:id/save-images', async (req, res) => {
 
     const saved = [], failed = [];
     for (const url of urls) {
-      try   { saved.push(await downloadAndSave(url, product.category)); }
+      try { saved.push(await downloadAndSave(url, product.category)); }
       catch (e) { failed.push({ url, reason: e.message }); }
     }
 
@@ -389,22 +409,27 @@ router.post('/:id/upload-images', upload.array('images', 20), async (req, res) =
     if (!product) return res.status(404).json({ message: 'Product not found.' });
     if (!req.files?.length) return res.status(400).json({ message: 'No images uploaded.' });
 
-    const category    = product.category || 'uncategorised';
+    const category = product.category || 'uncategorised';
     const categoryDir = getCategoryDir(category);
-    const saved       = [];
+    const saved = [];
 
     for (const file of req.files) {
       try {
-        const processed   = await sharp(file.path)
-          .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
+        const processed = await sharp(file.path)
+          .resize(1024, 1024, { fit: 'inside', withoutEnlargology: true })
           .webp({ quality: 88 })
           .toBuffer();
         const newFilename = file.filename.replace(/\.[^.]+$/, '') + '-gallery.webp';
         fs.writeFileSync(path.join(categoryDir, newFilename), processed);
-        try { fs.unlinkSync(file.path); } catch {} // remove multer temp
+        try { fs.unlinkSync(file.path); } catch { } // remove multer temp
         saved.push(getCategoryUrl(category, newFilename));
       } catch (e) {
         logger.warn('Image normalise failed — keeping original', { file: file.filename, error: e.message });
+
+        // Move original fallback file from temp directory to final category directory
+        const targetPath = path.join(categoryDir, file.filename);
+        fs.renameSync(file.path, targetPath);
+
         saved.push(getCategoryUrl(category, file.filename));
       }
     }
@@ -426,7 +451,7 @@ router.delete('/:id/images/:index', async (req, res) => {
     const product = await Product.findById(req.params.id).lean();
     if (!product) return res.status(404).json({ message: 'Product not found.' });
 
-    const idx  = parseInt(req.params.index, 10);
+    const idx = parseInt(req.params.index, 10);
     const imgs = [...(product.additionalImages || [])];
     if (idx < 0 || idx >= imgs.length)
       return res.status(400).json({ message: 'Invalid image index.' });
@@ -456,16 +481,16 @@ router.put('/:id/primary-image/:index', async (req, res) => {
     const product = await Product.findById(req.params.id).lean();
     if (!product) return res.status(404).json({ message: 'Product not found.' });
 
-    const idx  = parseInt(req.params.index, 10);
+    const idx = parseInt(req.params.index, 10);
     const imgs = [...(product.additionalImages || [])];
     if (idx < 0 || idx >= imgs.length)
       return res.status(400).json({ message: 'Invalid image index.' });
 
     const newPrimary = imgs[idx];
-    imgs[idx]        = product.imageUrl || '';
+    imgs[idx] = product.imageUrl || '';
 
     await Product.findByIdAndUpdate(req.params.id, {
-      imageUrl:         newPrimary,
+      imageUrl: newPrimary,
       additionalImages: imgs.filter(Boolean),
     });
 
@@ -498,15 +523,15 @@ router.put('/:id/video', async (req, res) => {
 router.post('/upload-temp-image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ message: 'No image uploaded.' });
-    const category    = req.body.category || 'uncategorised';
+    const category = req.body.category || 'uncategorised';
     const categoryDir = getCategoryDir(category);
-    const processed   = await sharp(req.file.path)
+    const processed = await sharp(req.file.path)
       .resize(1024, 1024, { fit: 'inside', withoutEnlargement: true })
       .webp({ quality: 88 })
       .toBuffer();
     const newFilename = req.file.filename.replace(/\.[^.]+$/, '') + '-custom.webp';
     fs.writeFileSync(path.join(categoryDir, newFilename), processed);
-    try { fs.unlinkSync(req.file.path); } catch {}
+    try { fs.unlinkSync(req.file.path); } catch { }
 
     const imageUrl = getCategoryUrl(category, newFilename);
     logger.debug('Temp image uploaded', { category, imageUrl, userId: req.user?.id });
@@ -518,14 +543,6 @@ router.post('/upload-temp-image', upload.single('image'), async (req, res) => {
 });
 
 // ─── POST /combos/generate — Combo Creator, stateless price-matching ──────────
-// Reads Product only. Nothing is written here — publishing a chosen candidate
-// is a separate, explicit step handled by POST /api/portal/:slug/combos in
-// clientPortalRoutes.js. Price tolerance is the tiered band baked into
-// generateCombos() (see comboEngine.js's getComboPriceBand) — not a
-// caller-supplied percentage anymore. subCategories is required, same as
-// categories — the Combo Creator UI requires both to be picked before it'll
-// even let you click Generate, and the engine uses subCategory to enforce
-// "at most one item per sub-category in any combo" regardless of filters.
 router.post('/combos/generate', async (req, res) => {
   try {
     const { categories, subCategories, targetPrice } = req.body;
