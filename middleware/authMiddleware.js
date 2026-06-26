@@ -11,10 +11,12 @@ const logger = require('../utils/logger').child({ module: 'authMiddleware' });
  * array = token required AND role must be in the list
  */
 const ROUTE_PERMISSIONS = {
-  '/auth':                 null,   // ALL /api/auth/* routes are public
-  '/public-site':          null,   // public-facing site routes
-  '/products':             ['inventory', 'sales', 'accounts', 'admin'],
-  '/vendors':              ['accounts', 'admin'],
+  '/auth':                    null,   // ALL /api/auth/* routes are public
+  '/public-site':             null,   // public-facing site routes
+  '/vendors/media':           null,   // OneDrive media proxy — auth handled by Graph bearer token
+  '/orders/proxy-attachment': null,   // OneDrive order attachment proxy — same pattern
+  '/products':                ['inventory', 'sales', 'accounts', 'admin'],
+  '/vendors':                 ['accounts', 'admin'],
   '/clients':              ['sales', 'accounts', 'admin'],
   '/catalogues':           ['inventory', 'sales', 'accounts', 'admin'],
   '/properties':           ['inventory', 'sales', 'accounts', 'admin'],

@@ -282,18 +282,36 @@ const uploadSingleFile = async (folderPath, filename, base64, mimeType) => {
  * @param {string}   mimeType    e.g. 'application/pdf'
  * @returns {Promise<{ fileId: string, webUrl: string }>}
  */
-const uploadSingleFileBuffer = async (folderPath, filename, buffer, mimeType) => {
+/**
+ * PATCHED — accepts an optional 5th parameter `folderId`.
+ * When folderId is supplied the folderPath walk is skipped entirely —
+ * the file is uploaded directly into that OneDrive item.
+ * All existing callers that only pass folderPath continue to work unchanged.
+ *
+ * @param {string[]} folderPath  e.g. ['development', 'vendors', 'Acme Corp']
+ * @param {string}   filename    e.g. 'uuid.pdf'
+ * @param {Buffer}   buffer      file buffer from req.file.buffer
+ * @param {string}   mimeType    e.g. 'application/pdf'
+ * @param {string}   [folderId]  OneDrive item ID — skips path resolution when provided
+ * @returns {Promise<{ fileId: string, webUrl: string }>}
+ */
+const uploadSingleFileBuffer = async (folderPath, filename, buffer, mimeType, folderId) => {
   const h = await authHeaders();
-  let parentId = 'root';
-  for (const segment of folderPath) {
-    parentId = await getOrCreateFolder(parentId, segment);
+  let parentId = folderId || 'root';
+  if (!folderId) {
+    for (const segment of folderPath) {
+      parentId = await getOrCreateFolder(parentId, segment);
+    }
   }
   const r = await axios.put(
     `${driveBase()}/items/${parentId}:/${filename}:/content`,
     buffer,
     { headers: { ...h, 'Content-Type': mimeType || 'application/octet-stream' } }
   );
-  logger.debug('OneDrive buffer upload complete', { path: folderPath.join('/'), filename });
+  logger.debug('OneDrive buffer upload complete', {
+    path: folderId ? `[id:${folderId}]` : folderPath.join('/'),
+    filename,
+  });
   return { fileId: r.data.id, webUrl: r.data.webUrl };
 };
 

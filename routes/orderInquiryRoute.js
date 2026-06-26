@@ -126,6 +126,8 @@ router.get('/:id/attachments', async (req, res) => {
       size:        f.size,
       webUrl:      f.webUrl,
       downloadUrl: f['@microsoft.graph.downloadUrl'],
+      itemId:      f.id,          // OneDrive item ID — used by /proxy-attachment
+      mimeType:    f.file?.mimeType || '',
       isOneDrive:  true,
     })));
   } catch (err) {
@@ -134,7 +136,88 @@ router.get('/:id/attachments', async (req, res) => {
   }
 });
 
+// ─── GET /proxy-attachment — authenticated OneDrive stream ───────────────────
+/**
+ * Streams a single OneDrive file through the backend so the browser never
+ * needs a SharePoint/Microsoft session. Identical pattern to the vendor
+ * media proxy (/api/vendors/media/:vendorId/:mediaId).
+ *
+ * Query params:
+ *   ?itemId=<OneDrive item ID>   (required)
+ *   ?download=1                  (optional — forces Content-Disposition: attachment)
+ *
+ * This route is whitelisted as public in authMiddleware (ROUTE_PERMISSIONS),
+ * matching '/orders/proxy-attachment'. The Graph bearer token (client
+ * credentials) is the actual auth layer for the file content.
+ */
+router.get('/proxy-attachment', async (req, res) => {
+  const { itemId, download } = req.query;
+  if (!itemId) return res.status(400).json({ error: 'itemId query param is required.' });
+
+  try {
+    const { getAccessToken } = require('../services/msGraphService');
+    const MICROSOFT_USER_ID  = process.env.MICROSOFT_USER_ID;
+    const token = await getAccessToken();
+
+    // Fetch item metadata from Graph — includes @microsoft.graph.downloadUrl
+    // which is a short-lived (~1h) pre-authenticated direct download URL.
+    const metaRes = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${MICROSOFT_USER_ID}/drive/items/${itemId}`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!metaRes.ok) {
+      const text = await metaRes.text();
+      logger.error('Graph item metadata failed', { itemId, status: metaRes.status, text });
+      return res.status(metaRes.status).json({ error: 'Could not resolve file from OneDrive.' });
+    }
+
+    const meta        = await metaRes.json();
+    const dlUrl       = meta['@microsoft.graph.downloadUrl'];
+    const mimeType    = meta.file?.mimeType || 'application/octet-stream';
+    const filename    = meta.name || 'file';
+
+    if (!dlUrl) return res.status(502).json({ error: 'OneDrive did not return a download URL.' });
+
+    // Stream the file back through our server
+    const fileRes = await fetch(dlUrl);
+    if (!fileRes.ok) return res.status(fileRes.status).json({ error: 'Failed to stream file from OneDrive.' });
+
+    res.setHeader('Content-Type', mimeType);
+    if (fileRes.headers.get('content-length')) {
+      res.setHeader('Content-Length', fileRes.headers.get('content-length'));
+    }
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.setHeader(
+      'Content-Disposition',
+      `${download === '1' ? 'attachment' : 'inline'}; filename="${encodeURIComponent(filename)}"`
+    );
+
+    const { Readable } = require('stream');
+    Readable.fromWeb(fileRes.body).pipe(res);
+
+  } catch (err) {
+    logger.error('Order attachment proxy failed', { itemId, error: err.message });
+    res.status(500).json({ error: 'Proxy error: ' + err.message });
+  }
+});
+
 // ─── POST / — create order ────────────────────────────────────────────────────
+/**
+ * STRATEGY: respond immediately after DB save, do OneDrive work in the background.
+ *
+ * The original flow was fully sequential:
+ *   buildOrderFolderHierarchy (4-5 Graph calls) → uploadFiles → save → respond
+ *
+ * That caused 30 s timeouts when the Graph API was slow or the token was being
+ * refreshed. Now:
+ *   1. Save to MongoDB with cleaned attachment metadata (no webUrls yet)
+ *   2. Auto-create ClientPortal
+ *   3. Respond 201 immediately — frontend unblocks
+ *   4. Background: create OneDrive folder, upload files, patch the order record
+ *
+ * The order appears in the list instantly. Attachment webUrls become available
+ * a few seconds later (visible after the user next opens the order or refreshes).
+ */
 router.post('/', async (req, res) => {
   try {
     const { title, clientName, orderPlacedBy, description, refNumber, attachments, orderType } = req.body;
@@ -142,79 +225,29 @@ router.post('/', async (req, res) => {
     if (!clientName || !orderPlacedBy)
       return res.status(400).json({ error: 'Client Name and Contact Person are required.' });
 
-    // Base fallback: strip base64 but keep name/type/size/lastModified.
-    // This is used only when OneDrive upload fails — webUrl will be absent
-    // and the row chip will render without a link (graceful degradation).
+    // Strip base64 from attachment metadata — we never store raw base64 in MongoDB.
+    // webUrl/downloadUrl will be backfilled by the background OneDrive job below.
     const cleanedAttachments = (attachments || []).map(({ name, type, size, lastModified }) => ({
       name, type, size, lastModified,
     }));
 
-    // Will be replaced with richer metadata if OneDrive upload succeeds.
-    let savedAttachmentMeta = cleanedAttachments;
-
-    // Create OneDrive folder — non-blocking on failure (order still saves).
-    // ORDER_FOLDER_ROOT switches automatically between 'website/orders' (prod)
-    // and 'development/orders' (dev) via utils/oneDrivePaths.
-    const folderLink = await (async () => {
-      try {
-        const { folderId, folderUrl } = await buildOrderFolderHierarchy({
-          ...req.body,
-          folderRoot: ORDER_FOLDER_ROOT,   // ← env-aware: 'website/orders' or 'development/orders'
-        });
-
-        // uploadFiles now returns [{ name, size, webUrl, downloadUrl }, ...]
-        // Use this to persist live URLs to MongoDB — no separate listFolderContents needed.
-        const uploadedMeta = await uploadFiles(folderId, attachments);
-
-        if (uploadedMeta?.length) {
-          // Merge: keep original type/lastModified from the client payload,
-          // enrich with webUrl/downloadUrl/size from the Graph response.
-          const byName = Object.fromEntries(
-            (attachments || []).map(a => [a.name, { type: a.type, lastModified: a.lastModified }])
-          );
-          savedAttachmentMeta = uploadedMeta.map(u => ({
-            name:         u.name,
-            size:         u.size,
-            webUrl:       u.webUrl       || null,
-            downloadUrl:  u.downloadUrl  || null,
-            type:         byName[u.name]?.type         || null,
-            lastModified: byName[u.name]?.lastModified || null,
-          }));
-        }
-
-        return folderUrl;
-      } catch (err) {
-        logger.warn('OneDrive folder creation failed — order will save without folder link', {
-          clientName, refNumber, error: err.message,
-        });
-        return null;
-      }
-    })();
-
+    // ── 1. Save to DB immediately ─────────────────────────────────────────────
     const order = new OrderInquiry({
       title, clientName, orderPlacedBy, description, refNumber,
-      orderType:         orderType || 'product',
-      status:            'inquiry',
-      oneDriveFolderUrl: folderLink,
-      attachments:       savedAttachmentMeta,  // ← includes webUrl/downloadUrl when OneDrive succeeds
+      orderType:   orderType || 'product',
+      status:      'inquiry',
+      attachments: cleanedAttachments,   // no webUrls yet — backfilled in background
     });
     await order.save();
 
-    logger.info('Order created', {
-      orderId:    order._id,
-      refNumber,
-      clientName,
-      orderType:  order.orderType,
-      hasFolder:  !!folderLink,
-      userId:     req.user?.id,
+    logger.info('Order created (fast path)', {
+      orderId: order._id, refNumber, clientName,
+      orderType: order.orderType, userId: req.user?.id,
     });
 
-    // 1. Declare the slug variable in the upper scope
+    // ── 2. Auto-create ClientPortal (fast — MongoDB only) ─────────────────────
     let createdSlug = null;
-
-    // Auto-create ClientPortal — non-fatal
     try {
-      //const slug = makePortalSlug(order.refNumber || order._id);
       const slug = makePortalSlug();
       await ClientPortal.create({
         orderId:       order._id,
@@ -225,21 +258,65 @@ router.post('/', async (req, res) => {
         orderPlacedBy: order.orderPlacedBy || '',
         title:         order.title || '',
       });
-
-      // 2. Assign the slug to the outer variable if creation succeeds
       createdSlug = slug;
       logger.debug('ClientPortal auto-created', { orderId: order._id, slug });
     } catch (portalErr) {
       logger.warn('ClientPortal auto-create skipped', { orderId: order._id, error: portalErr.message });
     }
 
-    // 3. Return a combined response payload
-    const responsePayload = {
-      ...order.toObject(), // Converts Mongoose document to plain object
-      ...(createdSlug && { slug: createdSlug }) // Conditionally includes slug if it exists
-    };
-    res.status(201).json(responsePayload);
-    //res.status(201).json(order);
+    // ── 3. Respond immediately ────────────────────────────────────────────────
+    res.status(201).json({
+      ...order.toObject(),
+      ...(createdSlug && { slug: createdSlug }),
+    });
+
+    // ── 4. Background: OneDrive folder + file uploads ─────────────────────────
+    // Runs after the response is sent — never blocks the client.
+    // Any failure is logged and non-fatal; the order is already saved.
+    setImmediate(async () => {
+      try {
+        const { folderId, folderUrl } = await buildOrderFolderHierarchy({
+          ...req.body,
+          folderRoot: ORDER_FOLDER_ROOT,
+        });
+
+        // Patch the order with the folder URL first so the edit modal can
+        // resolve the folder even before attachments finish uploading.
+        await OrderInquiry.findByIdAndUpdate(order._id, { oneDriveFolderUrl: folderUrl });
+        logger.debug('OneDrive folder created (background)', { orderId: order._id, folderUrl });
+
+        // Upload attachments that have base64 data
+        const toUpload = (attachments || []).filter(a => a.base64 || a.data);
+        if (toUpload.length) {
+          const uploadedMeta = await uploadFiles(folderId, toUpload);
+
+          if (uploadedMeta?.length) {
+            const byName = Object.fromEntries(
+              toUpload.map(a => [a.name, { type: a.type, lastModified: a.lastModified }])
+            );
+            const enrichedAttachments = uploadedMeta.map(u => ({
+              name:         u.name,
+              size:         u.size,
+              webUrl:       u.webUrl      || null,
+              downloadUrl:  u.downloadUrl || null,
+              type:         byName[u.name]?.type         || null,
+              lastModified: byName[u.name]?.lastModified || null,
+            }));
+
+            await OrderInquiry.findByIdAndUpdate(order._id, { attachments: enrichedAttachments });
+            logger.info('OneDrive attachments uploaded (background)', {
+              orderId: order._id, count: enrichedAttachments.length,
+            });
+          }
+        }
+      } catch (bgErr) {
+        // Non-fatal — order exists in DB; OneDrive sync can be retried manually
+        logger.error('OneDrive background sync failed (order still saved)', {
+          orderId: order._id, error: bgErr.message,
+        });
+      }
+    });
+
   } catch (err) {
     if (err.code === 11000) {
       logger.warn('Order creation blocked — duplicate ref number', { refNumber: req.body.refNumber });

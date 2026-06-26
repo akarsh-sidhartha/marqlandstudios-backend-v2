@@ -99,6 +99,63 @@ router.patch('/:id/add-contact', async (req, res) => {
   }
 });
 
+// ─── Move contact from one client to another ──────────────────────────────────
+// Body: { fromClientId, contactName, toClientId, newEmail? }
+// Removes the contact from the source client and upserts into the destination.
+router.patch('/move-contact', async (req, res) => {
+  try {
+    const { fromClientId, contactName, toClientId, newEmail } = req.body;
+    if (!fromClientId || !contactName || !toClientId) {
+      return res.status(400).json({ message: 'fromClientId, contactName, and toClientId are required.' });
+    }
+    if (fromClientId === toClientId) {
+      return res.status(400).json({ message: 'Source and destination clients must be different.' });
+    }
+
+    const [fromClient, toClient] = await Promise.all([
+      Client.findById(fromClientId),
+      Client.findById(toClientId),
+    ]);
+    if (!fromClient) return res.status(404).json({ message: 'Source client not found.' });
+    if (!toClient)   return res.status(404).json({ message: 'Destination client not found.' });
+
+    // Find contact in source
+    const contactIndex = fromClient.contacts.findIndex(
+      c => c.name?.toLowerCase() === contactName.trim().toLowerCase()
+    );
+    if (contactIndex === -1) {
+      return res.status(404).json({ message: 'Contact not found in source client.' });
+    }
+
+    // Pull the contact out and optionally update email
+    const [contact] = fromClient.contacts.splice(contactIndex, 1);
+    if (newEmail !== undefined && newEmail !== null) {
+      contact.email = newEmail.trim();
+    }
+
+    // Avoid duplicates in destination (match by name, case-insensitive)
+    const alreadyInDest = toClient.contacts.some(
+      c => c.name?.toLowerCase() === contact.name?.toLowerCase()
+    );
+    if (!alreadyInDest) {
+      toClient.contacts.push({ name: contact.name, phone: contact.phone, email: contact.email });
+    }
+
+    await Promise.all([fromClient.save(), toClient.save()]);
+
+    logger.info('Contact moved', {
+      contact: contact.name,
+      from: fromClient.companyName,
+      to: toClient.companyName,
+      userId: req.user?.id,
+    });
+
+    res.json({ fromClient, toClient });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // ─── Delete client ────────────────────────────────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {

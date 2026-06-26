@@ -66,6 +66,16 @@ const buildMulter = (opts = {}) => multer({
 const wrap = (multerMiddleware, mode) => (req, res, next) => {
   multerMiddleware(req, res, async (err) => {
     if (err) return next(err);
+
+    // ── Vendor routes (and any future route) set req.skipStorageRouter = true
+    // to handle their own uploads. Multer has already captured the buffers into
+    // req.file / req.files — we just skip the storageRouter dispatch entirely.
+    if (req.skipStorageRouter) {
+      req.uploadedFiles = [];
+      req.uploadedFile  = null;
+      return next();
+    }
+
     try {
       if (mode === 'single') {
         if (!req.file) return next();
