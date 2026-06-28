@@ -178,6 +178,31 @@ const clientPortalSchema = new mongoose.Schema(
     productItems: [productItemSchema],
     offsiteItems: [offsiteItemSchema],
 
+    // ── Combo bundles ─────────────────────────────────────────────────────────
+    // Each entry is a snapshot of a generated Combo, pinned at portal-creation
+    // time so changes to the master Combo record don't silently alter what the
+    // client already saw. comboId holds the source Combo._id for reference.
+    comboItems: [{
+      comboId:         { type: String },                        // source Combo._id (string ref)
+      label:           { type: String, default: '' },
+      totalPrice:      { type: Number, default: 0 },
+      collageImageUrl: { type: String, default: '' },           // pre-generated hero image
+      items: [{                                                  // snapshot of each product
+        productId:        { type: String },
+        name:             { type: String, required: true },
+        description:      { type: String, default: '' },
+        imageUrl:         { type: String, default: '' },
+        additionalImages: { type: [String], default: [] },
+        videoUrl:         { type: String, default: '' },
+        price:            { type: Number, default: 0 },
+        category:         { type: String, default: '' },
+        subCategory:      { type: String, default: '' },
+        order:            { type: Number, default: 0 },
+      }],
+      note:  { type: String, default: '' },
+      order: { type: Number, default: 0 },
+    }],
+
     messages: [messageSchema],
 
     status: { type: String, enum: ["active", "completed"], default: "active" },

@@ -81,6 +81,7 @@ const shipmentRoutes = require('./routes/shipmentRoutes');
 const shippingPartnerRoutes = require('./routes/shippingPartnerRoutes');
 const leadScoutRoutes = require('./routes/leadScoutRoutes');
 const clientPortalRoutes = require('./routes/clientPortalRoutes');
+const comboRoutes = require('./routes/comboRoutes');
 
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
@@ -152,6 +153,7 @@ app.use('/api/lead-scout', leadScoutRoutes);
 app.use('/api/public-site', publicSiteRoutes);
 app.use('/api/portal', clientPortalRoutes);
 app.use('/api/logs', logRoutes);
+app.use('/api/combos', comboRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res, next) => {

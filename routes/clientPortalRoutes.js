@@ -357,6 +357,21 @@ router.put('/:slug/items', async (req, res) => {
   }
 });
 
+/** PUT /api/portal/:slug/combo-items — attach/replace combo bundles on a portal */
+router.put('/:slug/combo-items', async (req, res) => {
+  try {
+    const portal = await ClientPortal.findOne({ slug: req.params.slug });
+    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+
+    portal.comboItems = req.body.comboItems || [];
+    await portal.save();
+    res.json(portal);
+  } catch (err) {
+    logger.error('combo-items PUT error', { err: err.message });
+    res.status(500).json({ message: err.message });
+  }
+});
+
 /** PUT /api/portal/:slug/meta (UNCHANGED) */
 router.put('/:slug/meta', async (req, res) => {
   try {
@@ -752,6 +767,7 @@ router.get('/public/:slug', async (req, res) => {
       teamNote:        portal.teamNote,
       productItems,
       offsiteItems:    portal.offsiteItems    || [],
+      comboItems:      portal.comboItems      || [],   // ← combo bundles for the Combo tab
       messages:        portal.messages        || [],
       status:          portal.status,
       completedAt:     portal.completedAt,
