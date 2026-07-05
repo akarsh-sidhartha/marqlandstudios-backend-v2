@@ -15,7 +15,14 @@ const ROUTE_PERMISSIONS = {
   '/public-site':             null,   // public-facing site routes
   '/vendors/media':           null,   // OneDrive media proxy — auth handled by Graph bearer token
   '/orders/proxy-attachment': null,   // OneDrive order attachment proxy — same pattern
+  // NEW: Supplier Portal — suppliers can only ever hit /api/suppliers/*.
+  // They deliberately do NOT get access to '/products' (that stays
+  // internal-roles-only below) so a supplier account can never read/write
+  // the live catalogue directly, only their own staging rows.
+  '/suppliers':                ['supplier'],
   '/products':                ['inventory', 'sales', 'accounts', 'admin'],
+  // NEW: admin review queue for supplier submissions — admin only.
+  '/admin/supplier-products':  ['admin'],
   '/vendors':                 ['accounts', 'admin'],
   '/clients':              ['sales', 'accounts', 'admin'],
   '/catalogues':           ['inventory', 'sales', 'accounts', 'admin'],

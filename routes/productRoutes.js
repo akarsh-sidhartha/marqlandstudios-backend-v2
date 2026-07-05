@@ -19,6 +19,7 @@ const sharp   = require('sharp');
 
 const Product      = require('../models/Product');
 const ImagePrompt  = require('../models/ImagePrompt');
+const SupplierProduct = require('../models/SupplierProduct'); // NEW — cascading deletion notice to the originating Partner
 const { processProductImage } = require('../services/imageProcessingService');
 const upload       = require('../middleware/upload');
 const { deleteFromR2, uploadBuffer, resolveFolder } = require('../services/r2Service');
@@ -178,6 +179,7 @@ router.put('/:id',
         subCategory:   req.body.subCategory   || existing.subCategory,
         markupPercent: req.body.markupPercent  !== undefined ? Number(req.body.markupPercent)  : existing.markupPercent,
         purchasePrice: req.body.purchasePrice  !== undefined ? Number(req.body.purchasePrice)  : existing.purchasePrice,
+        sellingPrice:  req.body.sellingPrice   !== undefined ? Number(req.body.sellingPrice)   : existing.sellingPrice, // NEW
       };
 
       if (req.uploadedFile) {
@@ -226,6 +228,21 @@ router.delete('/:id', async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found.' });
+
+    // NEW — if this product originated from a Partner submission, keep that
+    // submission's record (already marked 'approved' at approval time — see
+    // adminSupplierRoutes.js) but flip it to 'deleted' with the admin's
+    // reason, so the partner sees why it was removed in "Review My Products".
+    const reason = (req.body?.reason || '').trim();
+    const originSubmission = await SupplierProduct.findOne({ convertedProductId: product._id });
+    if (originSubmission) {
+      originSubmission.status = 'deleted';
+      originSubmission.deletionReason = reason || 'Removed by Marqland Studios.';
+      await originSubmission.save();
+      logger.info('Notified originating supplier of product deletion', {
+        productId: product._id, supplierProductId: originSubmission._id, supplierId: originSubmission.supplier,
+      });
+    }
 
     // Delete primary image from R2
     if (product.imageKey) await deleteFromR2(product.imageKey);

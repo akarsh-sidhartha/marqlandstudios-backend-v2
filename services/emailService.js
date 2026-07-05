@@ -73,17 +73,41 @@ const verifyEmailConfig = async () => {
 };
 
 /**
- * Send employee invite email.
+ * Send invite email.
+ * inviteType: 'employee' (default) | 'supplier'
+ *   - employee -> unchanged: Marqland Internal Portal copy, links to ADMIN_URL/#/invite?token=...
+ *   - supplier -> Partner-facing copy, links to CLIENT_URL/partner?token=... (the public
+ *     marqlandstudios.com site's Partner page, which has its own inline
+ *     "complete your registration" form for the token — not the admin app).
  */
-const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland Admin') => {
+const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland Admin', inviteType = 'employee') => {
   const transporter = createTransporter();
-  const appUrl = process.env.ADMIN_URL || 'http://localhost:3000';
-  const inviteLink = `${appUrl}/#/invite?token=${inviteToken}`;
+
+  const isSupplier = inviteType === 'supplier';
+  const appUrl = isSupplier
+    ? (process.env.CLIENT_URL || 'http://localhost:3001')
+    : (process.env.ADMIN_URL || 'http://localhost:3000');
+  const inviteLink = isSupplier
+    ? `${appUrl}/partner?token=${inviteToken}`
+    : `${appUrl}/#/invite?token=${inviteToken}`;
+
+  const heading = isSupplier
+    ? `You're invited! 🎉`
+    : `You're invited! 🎉`;
+  const bodyCopy = isSupplier
+    ? `<strong>Marqland Studios</strong> has invited you to join the <strong>Marqland Studios Family of Suppliers</strong>. Click the button below to set up your account.`
+    : `<strong>${inviterName}</strong> has invited you to join the <strong>Marqland Internal Portal</strong>. Click the button below to set up your account.`;
+  const subject = isSupplier
+    ? `You're invited to join Marqland Studios' Family of Suppliers`
+    : `You've been invited to Marqland Internal Portal`;
+  const footerCopy = isSupplier
+    ? `Sent by Marqland Studios. If unexpected, ignore this email.`
+    : `Sent by ${inviterName} via Marqland Internal Portal. If unexpected, ignore this email.`;
 
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
     to: toEmail,
-    subject: `You've been invited to Marqland Internal Portal`,
+    subject,
     html: `
 <!DOCTYPE html>
 <html lang="en">
@@ -107,10 +131,9 @@ const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland
         </tr>
         <tr>
           <td style="padding:40px 40px 32px;">
-            <h1 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#1e293b;">You're invited! 🎉</h1>
+            <h1 style="margin:0 0 8px;font-size:24px;font-weight:800;color:#1e293b;">${heading}</h1>
             <p style="margin:0 0 24px;font-size:15px;color:#64748b;line-height:1.6;">
-              <strong>${inviterName}</strong> has invited you to join the <strong>Marqland Internal Portal</strong>.
-              Click the button below to set up your account.
+              ${bodyCopy}
             </p>
             <table cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
               <tr>
@@ -137,8 +160,72 @@ const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland
         <tr>
           <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 40px;">
             <p style="margin:0;font-size:12px;color:#94a3b8;">
-              Sent by ${inviterName} via Marqland Internal Portal. If unexpected, ignore this email.
+              ${footerCopy}
             </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+  });
+};
+
+/**
+ * Send a "we're unable to onboard you as a partner" notification, with the
+ * admin's reason, when a Partner Lead is deleted/rejected from AdminView.js.
+ */
+const sendPartnerRejectionEmail = async ({ to, companyName, contactName, reason }) => {
+  const transporter = createTransporter();
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || `Marqland Studios <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `Update on your Marqland Studios Partner application`,
+    html: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',system-ui,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px;">
+    <tr><td align="center">
+      <table width="520" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background:#0f172a;padding:32px 40px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="background:#b8975a;width:36px;height:36px;border-radius:8px;text-align:center;vertical-align:middle;">
+                <span style="color:#0f172a;font-size:18px;font-weight:900;">▦</span>
+              </td>
+              <td style="padding-left:12px;color:#fff;font-size:20px;font-weight:800;letter-spacing:-0.02em;text-transform:uppercase;">Marqland Studios</td>
+            </tr></table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:40px 40px 32px;">
+            <h1 style="margin:0 0 8px;font-size:22px;font-weight:800;color:#1e293b;">Thank you for your interest${contactName ? `, ${contactName}` : ''}</h1>
+            <p style="margin:0 0 20px;font-size:15px;color:#64748b;line-height:1.6;">
+              We appreciate ${companyName ? `<strong>${companyName}</strong>` : 'you'} taking the time to apply to become a Marqland Studios
+              partner supplier. After review, we're unable to move forward with onboarding at this time.
+            </p>
+            <table cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:24px;width:100%;">
+              <tr>
+                <td style="padding:16px 18px;font-size:13px;color:#334155;line-height:1.6;">
+                  <strong>Note from our team:</strong><br/>${reason}
+                </td>
+              </tr>
+            </table>
+            <p style="font-size:13px;color:#64748b;line-height:1.6;margin:0;">
+              We'd welcome a future application should your offering evolve. Thank you again for your interest in Marqland Studios.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 40px;">
+            <p style="margin:0;font-size:12px;color:#94a3b8;">Marqland Studios — Partner Program</p>
           </td>
         </tr>
       </table>
@@ -152,10 +239,14 @@ const sendInviteEmail = async (toEmail, inviteToken, inviterName = 'The Marqland
 /**
  * Send password reset email.
  */
-const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there') => {
+const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there', isSupplier = false) => {
   const transporter = createTransporter();
-  const appUrl = process.env.ADMIN_URL || 'http://localhost:3000';
-  const resetLink = `${appUrl}/#/?reset=${resetToken}`;
+  const appUrl = isSupplier
+    ? (process.env.CLIENT_URL || 'http://localhost:3001')
+    : (process.env.ADMIN_URL || 'http://localhost:3000');
+  const resetLink = isSupplier
+    ? `${appUrl}/partner?reset=${resetToken}`
+    : `${appUrl}/#/?reset=${resetToken}`;
 
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
@@ -372,6 +463,7 @@ const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, ord
 
 module.exports = {
   sendInviteEmail,
+  sendPartnerRejectionEmail,
   sendPasswordResetEmail,
   sendPortalEmail,
   verifyEmailConfig,

@@ -9,6 +9,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const path = require('path');
 const cron = require('node-cron');
+const sanitizeBody = require('./middleware/sanitizeBody'); // NEW — NoSQL injection hardening (body-only, avoids express-mongo-sanitize's req.query crash)
 
 const app = express();
 
@@ -50,6 +51,12 @@ app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(cookieParser());
 
+// NEW — strips any req.body keys containing `$` or `.` (NoSQL injection
+// hardening). Only touches req.body (safe to reassign); does NOT touch
+// req.query/req.params, which express-mongo-sanitize crashes on in this
+// Express/Node version (getter-only accessors).
+app.use(sanitizeBody);
+
 // ─── Request Logging ─────────────────────────────────────────────────────────
 // attachRequestId stamps req.requestId on every request — used by all downstream logs.
 app.use(attachRequestId);
@@ -82,6 +89,9 @@ const shippingPartnerRoutes = require('./routes/shippingPartnerRoutes');
 const leadScoutRoutes = require('./routes/leadScoutRoutes');
 const clientPortalRoutes = require('./routes/clientPortalRoutes');
 const comboRoutes = require('./routes/comboRoutes');
+// NEW — Supplier Portal
+const supplierRoutes = require('./routes/supplierRoutes');
+const adminSupplierRoutes = require('./routes/adminSupplierRoutes');
 
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
@@ -154,6 +164,9 @@ app.use('/api/public-site', publicSiteRoutes);
 app.use('/api/portal', clientPortalRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/combos', comboRoutes);
+// NEW — Supplier Portal
+app.use('/api/suppliers', supplierRoutes);
+app.use('/api/admin/supplier-products', adminSupplierRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
@@ -263,4 +276,3 @@ app.listen(PORT,() => {
     apiBase: IS_PRODUCTION ? 'https://api.marqlandstudios.com' : `http://localhost:${PORT}`,
   });
 });
-

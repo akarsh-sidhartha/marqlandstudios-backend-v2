@@ -50,6 +50,7 @@ const FOLDER_MAP = {
   portal:    'website/internalApp/portal',
   publicApp: 'website/publicApp',
   store:     'website/store',
+  supplierSubmissions: 'website/internalApp/supplierSubmissions', // NEW — Supplier Portal staging uploads
 };
 
 /**

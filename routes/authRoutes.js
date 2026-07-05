@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Invite = require('../models/Invite');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
 const { sendInviteEmail, sendPasswordResetEmail } = require('../services/emailService');
+const { validateBody } = require('../utils/inputValidation'); // NEW — security hardening
 const logger = require('../utils/logger').child({ module: 'authRoutes' });
 
 // ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
@@ -115,14 +116,11 @@ router.get('/invite/verify', async (req, res) => {
  * POST /api/auth/invite/register
  * Register using an invite token. Email is pre-filled and locked from the token.
  */
-router.post('/invite/register', async (req, res) => {
+router.post('/invite/register',
+  validateBody({ name: 'name', password: 'password' }, ['token', 'name', 'password']),
+  async (req, res) => {
   try {
     const { token, name, password } = req.body;
-
-    if (!token || !name || !password)
-      return res.status(400).json({ message: 'Token, name, and password are required.' });
-    if (password.length < 8)
-      return res.status(400).json({ message: 'Password must be at least 8 characters.' });
 
     const invite = await Invite.findOne({ token, used: false });
     if (!invite)
@@ -158,12 +156,11 @@ router.post('/invite/register', async (req, res) => {
 /**
  * POST /api/auth/login
  */
-router.post('/login', async (req, res) => {
+router.post('/login',
+  validateBody({ email: 'email', password: 'password' }, ['email', 'password']),
+  async (req, res) => {
   try {
     const { email, password } = req.body;
-
-    if (!email || !password)
-      return res.status(400).json({ message: 'Email and password are required.' });
 
     const user = await User.findOne({ email: email.toLowerCase() }).select('+password +refreshToken');
 
@@ -353,7 +350,7 @@ router.post('/forgot-password', async (req, res) => {
     user.passwordResetExpires = resetExpires;
     await user.save();
 
-    await sendPasswordResetEmail(user.email, resetToken, user.name);
+    await sendPasswordResetEmail(user.email, resetToken, user.name, user.role === 'supplier');
     logger.info('Password reset email sent', { userId: user._id, email: user.email });
 
     res.json(SAFE_RESPONSE);
@@ -407,7 +404,7 @@ router.post('/reset-password', async (req, res) => {
  */
 router.post('/invite', authenticate, authorize(['admin']), async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, inviteType } = req.body; // NEW — inviteType: 'employee' (default) | 'supplier'
     if (!email)
       return res.status(400).json({ message: 'Email address is required.' });
 
@@ -422,15 +419,15 @@ router.post('/invite', authenticate, authorize(['admin']), async (req, res) => {
     // Resend existing unused invite if still valid
     const existingInvite = await Invite.findOne({ email: normalizedEmail, used: false });
     if (existingInvite && new Date() < existingInvite.expiresAt) {
-      await sendInviteEmail(normalizedEmail, existingInvite.token, req.user.name);
+      await sendInviteEmail(normalizedEmail, existingInvite.token, req.user.name, inviteType);
       return res.json({ message: `Invite resent to ${email}.` });
     }
 
     const token  = crypto.randomBytes(32).toString('hex');
-    const invite = new Invite({ email: normalizedEmail, token, invitedBy: req.user.id });
+    const invite = new Invite({ email: normalizedEmail, token, invitedBy: req.user.id, inviteType: inviteType || 'employee' });
     await invite.save();
 
-    await sendInviteEmail(normalizedEmail, token, req.user.name);
+    await sendInviteEmail(normalizedEmail, token, req.user.name, inviteType);
 
     logger.info('Invite sent', { to: normalizedEmail, sentBy: req.user.id });
     res.status(201).json({ message: `Invite sent successfully to ${email}.` });
@@ -503,7 +500,7 @@ router.get('/users/pending', authenticate, authorize(['admin']), async (req, res
 router.patch('/users/:id/approve', authenticate, authorize(['admin']), async (req, res) => {
   try {
     const { role } = req.body;
-    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer'];
+    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'];
     if (!role || !validRoles.includes(role))
       return res.status(400).json({ message: `Role must be one of: ${validRoles.join(', ')}` });
 
@@ -526,7 +523,7 @@ router.patch('/users/:id/approve', authenticate, authorize(['admin']), async (re
 router.patch('/users/:id/role', authenticate, authorize(['admin']), async (req, res) => {
   try {
     const { role } = req.body;
-    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer'];
+    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'];
     if (!role || !validRoles.includes(role))
       return res.status(400).json({ message: `Role must be one of: ${validRoles.join(', ')}` });
     if (req.params.id === req.user.id && role !== 'admin')

@@ -11,6 +11,7 @@ const productSchema = new mongoose.Schema({
   purchasePrice: { type: Number, required: true },
   markupPercent: { type: Number, default: 10 },
   imageUrl: String,
+  sellingPrice: { type: Number, required: true }, // while partner uploads the product.
   // Additional product angles / lifestyle shots sourced from reverse image search
   // or manually uploaded. Stored as local /uploads/... paths (downloaded + saved).
   additionalImages: {

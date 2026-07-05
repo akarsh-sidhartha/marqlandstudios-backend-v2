@@ -24,14 +24,25 @@ const userSchema = new mongoose.Schema({
   passwordResetToken: { type: String, default: undefined },
   passwordResetExpires: { type: Date, default: undefined },
   role: {
+    // CHANGED: added 'supplier' — used by the Partner Portal. Suppliers are
+    // intentionally NOT given any of the internal app's default route access;
+    // see authMiddleware.js ROUTE_PERMISSIONS and authRoutes.js approve logic.
     type: String,
-    enum: ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer'],
+    enum: ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'],
     default: 'viewer', // Admin assigns the actual role on approval
   },
   status: {
     type: String,
     enum: ['pending', 'active', 'suspended'],
     default: 'pending', // All new registrations start as pending
+  },
+  // NEW — only meaningful when role === 'supplier'. Lets suppliers see a
+  // branded portal ("Welcome, Acme Fittings") and lets the OneDrive video
+  // path resolver build "supplier folder -> <supplierCompanyName>".
+  supplierCompanyName: {
+    type: String,
+    default: '',
+    trim: true,
   },
   // Tracks which admin approved this user
   approvedBy: {

@@ -47,7 +47,13 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand, ListObjectsV2Command } 
 const StoreCategory = require('../../models/public-site/StoreCategory');
 const Testimonial   = require('../../models/public-site/Testimonial');
 const PublicInquiry = require('../../models/public-site/PublicInquiry');
+const PartnerLead   = require('../../models/public-site/PartnerLead'); // NEW — Partner tab lead capture
+const User          = require('../../models/User'); // NEW — duplicate-registration check
 const { authenticate, authorize } = require('../../middleware/authMiddleware');
+const { validateBody, normalizeUrl } = require('../../utils/inputValidation'); // NEW — security hardening
+const { uploadSingleFileBuffer } = require('../../services/msGraphService'); // NEW — portfolio -> OneDrive
+const { sendPartnerRejectionEmail } = require('../../services/emailService'); // NEW — reject-and-notify
+const { odvPath } = require('../../utils/oneDrivePaths'); // NEW
 const logger = require('../../utils/logger').child({ module: 'publicSiteRoutes' });
 
 const adminOnly = [authenticate, authorize(['admin'])];
@@ -154,6 +160,16 @@ const imageUpload = multer({
     file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only image files allowed.')),
 });
 
+// NEW — Partner registration "Upload Catalog/Portfolio" — PDF or ZIP only, goes to OneDrive not R2.
+const portfolioUpload = multer({
+  storage:    multer.memoryStorage(),
+  limits:     { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['application/pdf', 'application/zip', 'application/x-zip-compressed'];
+    return allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error('Only PDF or ZIP files are allowed.'));
+  },
+});
+
 // ─── Public store payload (UNCHANGED) ────────────────────────────────────────
 const buildStorePayload = async () => {
   const [categories, testimonials] = await Promise.all([
@@ -216,19 +232,82 @@ router.get('/store', async (req, res) => {
   }
 });
 
-router.post('/inquiry', async (req, res) => {
-  try {
-    const { name, company, email, phone, message, hearAbout } = req.body;
-    if (!name?.trim() || !email?.trim())
-      return res.status(400).json({ message: 'Name and email are required.' });
-    const inq = await PublicInquiry.create({ name, company, email, phone, message, hearAbout });
-    logger.info('Public inquiry received', { inquiryId: inq._id, email });
-    res.status(201).json({ message: 'Inquiry received.', id: inq._id });
-  } catch (err) {
-    logger.error('Public inquiry creation failed', { error: err.message, stack: err.stack });
-    res.status(500).json({ message: err.message });
+router.post('/inquiry',
+  validateBody(
+    { name: 'name', company: 'name', email: 'email', phone: 'phone', message: 'message', hearAbout: 'message' },
+    ['name', 'email']
+  ),
+  async (req, res) => {
+    try {
+      const { name, company, email, phone, message, hearAbout } = req.body;
+      const inq = await PublicInquiry.create({ name, company, email, phone, message, hearAbout });
+      logger.info('Public inquiry received', { inquiryId: inq._id, email });
+      res.status(201).json({ message: 'Inquiry received.', id: inq._id });
+    } catch (err) {
+      logger.error('Public inquiry creation failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ message: 'Submission failed. Please try again.' });
+    }
   }
-});
+);
+
+// NEW — Partner tab registration form (interest capture, not full Supplier onboarding)
+router.post('/partner-leads',
+  (req, res, next) => portfolioUpload.single('portfolio')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ message: 'That file is larger than the 50MB limit. Please upload a smaller file.' });
+      }
+      return res.status(400).json({ message: err.message.includes('PDF or ZIP') ? err.message : 'File upload failed.' });
+    }
+    next();
+  }),
+  validateBody(
+    { companyName: 'name', contactName: 'name', email: 'email', phone: 'phone', website: 'url', productCategories: 'name', message: 'message' },
+    ['companyName', 'contactName', 'email']
+  ),
+  async (req, res) => {
+    try {
+      const { companyName, contactName, phone, productCategories, message } = req.body;
+      const email = req.body.email.toLowerCase().trim();
+      const website = normalizeUrl(req.body.website); // e.g. "www.acme.com" -> "https://www.acme.com"
+
+      // NEW — don't let the same email submit twice, and point them to the
+      // right next step depending on where they already are in the flow.
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(409).json({ message: 'User is already registered. You can login.' });
+      }
+      const existingLead = await PartnerLead.findOne({ email });
+      if (existingLead) {
+        return res.status(409).json({ message: 'Registration is pending for approval.' });
+      }
+
+      let attachmentOneDrivePath = '';
+      let attachmentWebUrl = '';
+      if (req.file) {
+        // Same folder convention as Supplier video uploads (supplierRoutes.js):
+        //   dev  -> development / supplier folder / {companyName}
+        //   prod -> website     / supplier folder / {companyName}
+        const folderName = companyName.replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'unknown-partner';
+        const folderPath = odvPath('supplier folder', folderName);
+        const ext = (req.file.originalname.match(/\.[a-zA-Z0-9]+$/) || [''])[0];
+        const filename = `portfolio-${Date.now()}${ext}`;
+        const result = await uploadSingleFileBuffer(folderPath, filename, req.file.buffer, req.file.mimetype);
+        attachmentOneDrivePath = `${folderPath.join('/')}/${filename}`;
+        attachmentWebUrl = result?.webUrl || '';
+      }
+
+      const lead = await PartnerLead.create({
+        companyName, contactName, email, phone, website, productCategories, message, attachmentOneDrivePath, attachmentWebUrl,
+      });
+      logger.info('Partner lead received', { leadId: lead._id, email, company: companyName, hasAttachment: !!attachmentOneDrivePath });
+      res.status(201).json({ message: 'Thanks! Our team will be in touch shortly.', id: lead._id });
+    } catch (err) {
+      logger.error('Partner lead creation failed', { error: err.message, stack: err.stack });
+      res.status(500).json({ message: 'Submission failed. Please try again.' });
+    }
+  }
+);
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -610,6 +689,83 @@ router.patch('/inquiries/:id/read', adminOnly, async (req, res) => {
   } catch (err) {
     logger.error('Inquiry mark-read failed', { inquiryId: req.params.id, error: err.message, stack: err.stack });
     res.status(500).json({ message: err.message });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARTNER LEADS — NEW (Partner tab registration submissions)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+router.get('/partner-leads', adminOnly, async (req, res) => {
+  try {
+    const leads = await PartnerLead.find().sort({ createdAt: -1 });
+    res.json(leads);
+  } catch (err) {
+    logger.error('Failed to list partner leads', { error: err.message, stack: err.stack });
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.patch('/partner-leads/:id/status', adminOnly, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const valid = ['new', 'contacted', 'invited', 'declined'];
+    if (!valid.includes(status))
+      return res.status(400).json({ message: `Status must be one of: ${valid.join(', ')}` });
+
+    const lead = await PartnerLead.findByIdAndUpdate(req.params.id, { status }, { new: true });
+    if (!lead) return res.status(404).json({ message: 'Lead not found.' });
+    logger.info('Partner lead status updated', { leadId: lead._id, status, userId: req.user?.id });
+    res.json(lead);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.patch('/partner-leads/:id/read', adminOnly, async (req, res) => {
+  try {
+    const lead = await PartnerLead.findByIdAndUpdate(req.params.id, { read: true }, { new: true });
+    if (!lead) return res.status(404).json({ message: 'Lead not found.' });
+    res.json(lead);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+router.delete('/partner-leads/:id', adminOnly, async (req, res) => {
+  try {
+    await PartnerLead.findByIdAndDelete(req.params.id);
+    logger.info('Partner lead deleted', { leadId: req.params.id, userId: req.user?.id });
+    res.json({ message: 'Lead deleted.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// NEW — "Delete" action from AdminView.js: sends the applicant a note
+// explaining why they weren't onboarded, then removes the lead.
+router.post('/partner-leads/:id/reject',
+  adminOnly,
+  validateBody({ reason: 'message' }, ['reason']),
+  async (req, res) => {
+  try {
+    const lead = await PartnerLead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ message: 'Lead not found.' });
+
+    await sendPartnerRejectionEmail({
+      to: lead.email,
+      companyName: lead.companyName,
+      contactName: lead.contactName,
+      reason: req.body.reason,
+    });
+
+    await lead.deleteOne();
+    logger.info('Partner lead rejected + notified', { leadId: req.params.id, email: lead.email, userId: req.user?.id });
+    res.json({ message: `${lead.email} has been notified, and the lead was removed.` });
+  } catch (err) {
+    logger.error('Partner lead reject-and-notify failed', { leadId: req.params.id, error: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Failed to send notification. The lead was not deleted.' });
   }
 });
 
