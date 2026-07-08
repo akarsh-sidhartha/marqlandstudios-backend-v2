@@ -4,9 +4,11 @@
  * Mounted at /api/orders
  *
  *   GET    /                  — list all orders (fast, DB only — no OneDrive calls)
+ *   GET    /shipment-counts   — orderId → linked shipment count  ← NEW
  *   GET    /:id/attachments   — live OneDrive listing for one order (lazy, on open)
  *   POST   /                  — create order + OneDrive folder + auto-create ClientPortal
  *   PATCH  /:id               — update order + sync OneDrive (rename folder, add/remove files)
+ *   POST   /:id/timeline      — post a staff update + send threaded client email  ← NEW
  *   DELETE /:id               — delete order + OneDrive folder
  *
  * STORAGE PATH CHANGE (2025):
@@ -45,7 +47,11 @@ const router       = express.Router();
 const crypto       = require('crypto');
 const OrderInquiry = require('../models/orderInquiry');
 const ClientPortal = require('../models/ClientPortal');
+const Client       = require('../models/Client'); // adjust path/name if your client model differs
+const Shipment     = require('../models/Shipment');
 const logger       = require('../utils/logger').child({ module: 'orderInquiryRoute' });
+
+const { sendTimelineUpdateEmail } = require('../services/emailService');
 
 const {
   buildOrderFolderHierarchy,
@@ -99,6 +105,25 @@ router.get('/', async (req, res) => {
   } catch (err) {
     logger.error('Orders list failed', { error: err.message, stack: err.stack });
     res.status(500).json([]);
+  }
+});
+
+// ─── GET /shipment-counts — orderId → linked shipment count ───────────────────
+// Backs the row-level "Linked Shipments" icon in OrderTracker.js — the icon is
+// only shown when an order actually has shipments, without needing to open the
+// (self-fetching) LinkedShipmentsPanel just to find out.
+router.get('/shipment-counts', async (req, res) => {
+  try {
+    const counts = await Shipment.aggregate([
+      { $match: { orderId: { $ne: null } } },
+      { $group: { _id: '$orderId', count: { $sum: 1 } } },
+    ]);
+    const result = {};
+    counts.forEach(c => { result[c._id.toString()] = c.count; });
+    res.json(result);
+  } catch (err) {
+    logger.error('Shipment counts failed', { error: err.message });
+    res.status(500).json({});
   }
 });
 
@@ -348,6 +373,21 @@ router.patch('/:id', async (req, res) => {
           if (newUrl) updateData.oneDriveFolderUrl = newUrl;
         }
 
+        // Rename OneDrive folder to quote number when a quote is first assigned
+        // (Start Project). Ref number itself is left untouched now — it stays
+        // the permanent INQ identifier. e.g. INQ-26-27-099 → QT-26-27-0095
+        if (
+          updateData.quoteNumber &&
+          updateData.quoteNumber !== existing.quoteNumber
+        ) {
+          const quoteFolderName = updateData.quoteNumber.replace(/\//g, '-').trim();
+          const newUrl = await renameItem(folderId, quoteFolderName).catch((e) => {
+            logger.warn('OneDrive folder rename (quote) failed', { orderId: req.params.id, error: e.message });
+            return null;
+          });
+          if (newUrl) updateData.oneDriveFolderUrl = newUrl;
+        }
+
         // Rename OneDrive folder to invoice number when order is marked completed.
         // e.g. QT-26-27-0072 → INV-26-27-008
         if (
@@ -428,6 +468,102 @@ router.patch('/:id', async (req, res) => {
   } catch (err) {
     logger.error('Order update failed', { orderId: req.params.id, error: err.message, stack: err.stack });
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── POST /:id/timeline — post a timeline update + threaded client email ─────
+/**
+ * Appends a staff-posted update to order.timeline and, if the order has a
+ * known client email and an established emailThread (set when the initial
+ * portal email was sent — see /api/portal/send-email), fires a threaded
+ * reply email so the update lands in the SAME inbox conversation as the
+ * original message.
+ *
+ * The email send is best-effort and non-fatal: if it fails (or there's no
+ * client email / no thread anchor yet), the timeline entry is still saved
+ * with emailSent:false and emailError set, so staff can see it needs
+ * attention without the whole request failing.
+ */
+router.post('/:id/timeline', async (req, res) => {
+  try {
+    const { status, message, postedBy } = req.body;
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: 'Update message is required.' });
+    }
+
+    const order = await OrderInquiry.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Order not found.' });
+
+    const event = {
+      status:    status || 'update',
+      message:   message.trim(),
+      postedBy:  postedBy || req.user?.email || req.user?.name || 'Staff',
+      createdAt: new Date(),
+    };
+
+    // Resolve the client contact's email (same lookup pattern as the
+    // frontend's /clients/lookup flow used at order-creation time).
+    let clientEmail = null;
+    try {
+      const client = await Client.findOne({ companyName: order.clientName }).lean();
+      const contact = client?.contacts?.find(
+        c => c.name?.toLowerCase() === (order.orderPlacedBy || '').toLowerCase()
+      );
+      clientEmail = contact?.email || null;
+    } catch (lookupErr) {
+      logger.warn('Client lookup failed for timeline email', { orderId: order._id, error: lookupErr.message });
+    }
+
+    if (clientEmail && order.emailThread?.messageId) {
+      try {
+        const portal = await ClientPortal.findOne({ orderId: order._id }).lean();
+        const portalUrl = portal?.slug
+          ? `${process.env.CLIENT_URL || 'https://www.marqlandstudios.com'}/p/${portal.slug}`
+          : null;
+
+        const priorRefs = order.emailThread.references || [];
+        const lastMessageId = priorRefs.length ? priorRefs[priorRefs.length - 1] : order.emailThread.messageId;
+
+        const { messageId } = await sendTimelineUpdateEmail({
+          clientEmail,
+          subject:     order.emailThread.subject,
+          inReplyTo:   lastMessageId,
+          references:  priorRefs.join(' '),
+          contactName: order.orderPlacedBy,
+          clientName:  order.clientName,
+          orderRef:    order.refNumber,
+          title:       order.title,
+          status:      event.status,
+          message:     event.message,
+          portalUrl,
+        });
+
+        event.emailSent = true;
+        order.emailThread.references = [...priorRefs, messageId];
+        logger.info('Timeline update email sent', { orderId: order._id, messageId });
+      } catch (emailErr) {
+        event.emailSent  = false;
+        event.emailError = emailErr.message;
+        logger.warn('Timeline update email failed (non-fatal)', { orderId: order._id, error: emailErr.message });
+      }
+    } else {
+      event.emailSent  = false;
+      event.emailError = !clientEmail
+        ? 'No client email on file for this contact.'
+        : 'No email thread linked to this order yet — the initial portal email may not have been sent.';
+    }
+
+    order.timeline = order.timeline || [];
+    order.timeline.push(event);
+    await order.save();
+
+    logger.info('Timeline update posted', {
+      orderId: order._id, status: event.status, emailSent: event.emailSent, userId: req.user?.id,
+    });
+    res.status(201).json(order.timeline[order.timeline.length - 1]);
+  } catch (err) {
+    logger.error('Timeline update failed', { orderId: req.params.id, error: err.message, stack: err.stack });
+    res.status(500).json({ error: err.message });
   }
 });
 

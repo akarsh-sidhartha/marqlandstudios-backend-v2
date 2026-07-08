@@ -583,7 +583,13 @@ router.delete('/:slug', async (req, res) => {
   }
 });
 
-/** POST /api/portal/send-email (UNCHANGED) */
+/**
+ * POST /api/portal/send-email
+ * CHANGED: now captures the {messageId, subject} returned by sendPortalEmail
+ * and persists them as OrderInquiry.emailThread — this is the one-time
+ * anchor that lets POST /api/orders/:id/timeline send later client updates
+ * as threaded replies (same Message-ID chain) instead of standalone emails.
+ */
 router.post('/send-email', async (req, res) => {
     const { slug, clientEmail, contactName, clientName, orderRef, title, cc } = req.body;
     
@@ -596,7 +602,7 @@ router.post('/send-email', async (req, res) => {
     const greetName  = contactName || clientName || 'there';
     const ccAddress  = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
     // Use the centralized service wrapper
-    await sendPortalEmail({
+    const { messageId, subject } = await sendPortalEmail({
       slug,
       clientEmail,
       contactName,
@@ -606,6 +612,26 @@ router.post('/send-email', async (req, res) => {
       portalUrl,
       cc
     });
+
+    // ── Anchor the email thread on the order ──────────────────────────────
+    // This is what lets POST /api/orders/:id/timeline send later updates as
+    // threaded replies (same Message-ID chain) instead of fresh emails.
+    // Non-fatal: if this fails, the portal email above has already sent —
+    // we just log it so staff know timeline updates won't thread correctly
+    // for this order until it's fixed.
+    try {
+      const portal = await ClientPortal.findOne({ slug }).lean();
+      if (portal?.orderId) {
+        await OrderInquiry.findByIdAndUpdate(portal.orderId, {
+          emailThread: { subject, messageId, references: [messageId] },
+        });
+        logger.debug('Email thread anchored on order', { orderId: portal.orderId, messageId });
+      } else {
+        logger.warn('No portal/orderId found for slug — emailThread not anchored', { slug });
+      }
+    } catch (threadErr) {
+      logger.warn('Failed to persist emailThread (non-fatal)', { slug, error: threadErr.message });
+    }
 /*
     await buildTransporter().sendMail({
       from:    process.env.EMAIL_FROM || `Marqland Studios <${process.env.EMAIL_USER}>`,

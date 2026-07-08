@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const crypto     = require('crypto');
 
 /**
  * backend/services/emailService.js
@@ -52,6 +53,17 @@ const createTransporter = () => {
     },
   });
 };
+
+/**
+ * ── Email threading helpers ────────────────────────────────────────────────
+ * Gmail/Outlook thread messages using the Message-ID / In-Reply-To /
+ * References headers — not subject-line matching. We generate our own
+ * Message-ID (rather than letting nodemailer auto-assign a random one) so
+ * we can persist it on the order and reference it again for every
+ * subsequent reply in the thread.
+ */
+const MESSAGE_ID_DOMAIN = (process.env.EMAIL_USER || 'marqland.com').split('@').pop();
+const generateMessageId = () => `<${crypto.randomUUID()}@${MESSAGE_ID_DOMAIN}>`;
 
 /**
  * Test SMTP connection — call on server startup to catch misconfig early.
@@ -323,17 +335,26 @@ const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there', i
  * @param {string} opts.title         - Project title
  * @param {string} opts.portalUrl     - Full portal URL (e.g. "https://app.marqland.com/p/uk2al-inq-26-27-002")
  * @param {string} [opts.cc]          - Optional CC address (defaults to info@marqland.com)
+ *
+ * @returns {Promise<{messageId: string, subject: string}>}
+ *   The Message-ID and subject used for THIS send. The caller (the
+ *   /api/portal/send-email route) must persist these on the order's
+ *   `emailThread` field — they're the anchor every later timeline-update
+ *   email threads off of.
  */
 const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, orderRef, title, portalUrl, cc }) => {
   const transporter = createTransporter();
   const ccAddress = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
   const firstName = (contactName || '').split(' ')[0] || 'there';
+  const subject   = `Your Project Portal — ${orderRef}: ${title}`;
+  const messageId = generateMessageId();
 
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
     to: clientEmail,
     cc: ccAddress,   // ← always CC info@marqland.com
-    subject: `Your Project Portal — ${orderRef}: ${title}`,
+    subject,
+    messageId,        // ← nodemailer sets the Message-ID header to exactly this value
     html: `
 <!DOCTYPE html>
 <html lang="en">
@@ -459,6 +480,188 @@ const sendPortalEmail = async ({ slug, clientEmail, contactName, clientName, ord
 </body>
 </html>`,
   });
+
+  return { messageId, subject };
+};
+
+/**
+ * Send a threaded timeline-update email — a reply in the SAME thread as the
+ * original portal email (see sendPortalEmail above).
+ *
+ * Threading is driven by headers, not by the subject line:
+ *   - Message-ID   — unique ID for THIS email (generated fresh each send)
+ *   - In-Reply-To  — Message-ID of the email being replied to (the previous
+ *                    one in the chain, or the original if this is the first reply)
+ *   - References   — the full chain of every prior Message-ID, oldest → newest,
+ *                    space-separated. Gmail in particular relies on this to
+ *                    stitch the whole conversation together.
+ *
+ * The subject is kept byte-for-byte identical to the original (with a
+ * cosmetic "Re: " prefix) so the thread also *looks* like one conversation
+ * in the client's UI, even though the headers are what actually thread it.
+ *
+ * @param {object} opts
+ * @param {string} opts.clientEmail  - Client's email address (TO)
+ * @param {string} [opts.cc]         - Optional CC address (defaults to info@marqland.com)
+ * @param {string} opts.subject      - The ORIGINAL email's subject (from order.emailThread.subject)
+ * @param {string} opts.inReplyTo    - Message-ID of the immediately preceding email in the thread
+ * @param {string} opts.references   - Space-separated chain of every prior Message-ID
+ * @param {string} opts.contactName  - Contact person's name
+ * @param {string} opts.clientName   - Company name
+ * @param {string} opts.orderRef     - Inquiry/quote ref number
+ * @param {string} opts.title        - Project title
+ * @param {string} opts.status       - Timeline event status (inquiry | ongoing | completed | update)
+ * @param {string} opts.message      - The update message body
+ * @param {string} [opts.portalUrl]  - Optional portal link to include in the email
+ *
+ * @returns {Promise<{messageId: string}>}
+ *   The Message-ID used for THIS send — the caller must append it to
+ *   order.emailThread.references so the NEXT update can chain off of it.
+ */
+const sendTimelineUpdateEmail = async ({
+  clientEmail, cc, subject, inReplyTo, references,
+  contactName, clientName, orderRef, title, status, message, portalUrl,
+}) => {
+  const transporter = createTransporter();
+  const ccAddress = cc || process.env.PORTAL_CC_EMAIL || 'info@marqland.com';
+  const firstName = (contactName || '').split(' ')[0] || 'there';
+  const messageId = generateMessageId();
+  const replySubject = subject?.trim().toLowerCase().startsWith('re:') ? subject : `Re: ${subject}`;
+
+  const STATUS_LABELS = {
+    inquiry: 'Inquiry Received', ongoing: 'In Production', completed: 'Completed', update: 'Update',
+  };
+
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,
+    to: clientEmail,
+    cc: ccAddress,
+    subject: replySubject,
+    messageId,
+    inReplyTo,   // nodemailer wraps this in <> automatically if needed
+    references,  // space-separated string — nodemailer passes it through as-is
+    html: `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Project Update</title>
+</head>
+<body style="margin:0;padding:0;background-color:#faf8f5;font-family:'Manrope', 'Segoe UI', system-ui, sans-serif;color:#1a1a1a;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:40px 20px;background-color:#faf8f5;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border:1px solid rgba(0,0,0,0.06);border-radius:0px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.05);">
+
+          <!-- Premium Navy Header Bar -->
+          <tr>
+            <td style="background-color:#0e1520;padding:32px 40px;border-bottom:1px solid rgba(255,255,255,0.05);">
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td width="28" style="background-color:#b8975a;width:28px;height:28px;border-radius:6px;text-align:center;vertical-align:middle;font-family:'Jost',sans-serif;font-weight:900;color:#0e1520;font-size:13px;">
+                    M
+                  </td>
+                  <td style="padding-left:12px;color:#ffffff;font-size:16px;font-weight:400;font-family:'Jost', sans-serif;letter-spacing:0.2em;text-transform:uppercase;">
+                    Marqland Studios
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Tonal Reference Bar Section -->
+          <tr>
+            <td style="background-color:#f2efe9;padding:12px 40px;border-bottom:1px solid rgba(0,0,0,0.05);">
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td>
+                    <span style="color:rgba(26,26,26,0.4);font-family:'Jost',sans-serif;font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.25em;">Reference</span>
+                    &nbsp;&nbsp;
+                    <span style="color:#b8975a;font-family:'Jost',sans-serif;font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;">${orderRef}</span>
+                    &nbsp;&nbsp;&nbsp;
+                    <span style="color:rgba(26,26,26,0.4);font-family:'Jost',sans-serif;font-size:9px;font-weight:500;text-transform:uppercase;letter-spacing:0.25em;">Status</span>
+                    &nbsp;&nbsp;
+                    <span style="color:#0e1520;font-family:'Jost',sans-serif;font-size:11px;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;">${STATUS_LABELS[status] || status}</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Main Body Copy Section -->
+          <tr>
+            <td style="padding:44px 40px 32px;">
+              <h1 style="margin:0 0 16px;font-family:'Cormorant Garamond', Georgia, serif;font-size:28px;font-weight:300;color:#1a1a1a;line-height:1.2;">
+                Update for <span style="color:#b8975a;font-style:italic;">${firstName},</span>
+              </h1>
+              <p style="margin:0 0 14px;font-size:14px;color:rgba(26,26,26,0.65);line-height:1.75;font-weight:400;">
+                There's a new update on <strong style="color:#1a1a1a;font-weight:600;">${title}</strong>.
+              </p>
+
+              <!-- Update message box -->
+              <table cellpadding="0" cellspacing="0" style="background-color:#f8fafc;border:1px solid rgba(0,0,0,0.06);width:100%;margin-bottom:32px;">
+                <tr>
+                  <td style="padding:20px 24px;font-family:'Jost',sans-serif;font-size:14px;color:#1a1a1a;line-height:1.75;font-weight:400;">
+                    ${message}
+                  </td>
+                </tr>
+              </table>
+
+              ${portalUrl ? `
+              <!-- Luxury Gold CTA Button -->
+              <table cellpadding="0" cellspacing="0" style="margin:0 0 36px;">
+                <tr>
+                  <td style="background-color:#b8975a;border-radius:0px;">
+                    <a href="${portalUrl}"
+                       style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg, #d4b06a, #b8975a);color:#0e1520;text-decoration:none;font-family:'Jost',sans-serif;font-size:10px;font-weight:500;letter-spacing:0.25em;text-transform:uppercase;box-shadow:0 4px 16px rgba(184,151,90,0.25);">
+                      Open Project Workspace →
+                    </a>
+                  </td>
+                </tr>
+              </table>` : ''}
+
+              <!-- Minimal Layered Info Box Section -->
+              <table cellpadding="0" cellspacing="0" style="background-color:#fff;border:1px solid rgba(0,0,0,0.07);width:100%;margin-bottom:8px;">
+                <tr>
+                  <td style="padding:20px 24px;">
+                    <table cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td style="font-family:'Jost',sans-serif;font-size:13px;color:#1a1a1a;padding-bottom:8px;font-weight:400;">
+                          <span style="color:rgba(26,26,26,0.45);">Client:</span> &nbsp;${clientName}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style="font-family:'Jost',sans-serif;font-size:13px;color:#1a1a1a;font-weight:400;">
+                          <span style="color:rgba(26,26,26,0.45);">Concierge Liaison:</span> &nbsp;${contactName}
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Tonal Studio Footer -->
+          <tr>
+            <td style="background-color:#ffffff;border-top:1px solid rgba(0,0,0,0.06);padding:24px 40px;text-align:center;">
+              <p style="margin:0;font-family:'Jost',sans-serif;font-size:11px;color:rgba(26,26,26,0.4);line-height:1.6;letter-spacing:0.03em;">
+                This secure distribution update was processed automatically by Marqland Studios.<br/>
+                Confidentiality Notice: This document contains proprietary client content. If encountered unexpectedly, please notify <a href="mailto:info@marqland.com" style="color:#b8975a;text-decoration:none;">info@marqland.com</a>.
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`,
+  });
+
+  return { messageId };
 };
 
 module.exports = {
@@ -466,5 +669,6 @@ module.exports = {
   sendPartnerRejectionEmail,
   sendPasswordResetEmail,
   sendPortalEmail,
+  sendTimelineUpdateEmail,
   verifyEmailConfig,
 };

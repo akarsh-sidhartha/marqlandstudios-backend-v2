@@ -92,6 +92,7 @@ const comboRoutes = require('./routes/comboRoutes');
 // NEW — Supplier Portal
 const supplierRoutes = require('./routes/supplierRoutes');
 const adminSupplierRoutes = require('./routes/adminSupplierRoutes');
+const messageTemplateRoutes = require('./routes/messageTemplateRoutes');
 
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
@@ -164,6 +165,7 @@ app.use('/api/public-site', publicSiteRoutes);
 app.use('/api/portal', clientPortalRoutes);
 app.use('/api/logs', logRoutes);
 app.use('/api/combos', comboRoutes);
+app.use('/api/message-templates', messageTemplateRoutes);
 // NEW — Supplier Portal
 app.use('/api/suppliers', supplierRoutes);
 app.use('/api/admin/supplier-products', adminSupplierRoutes);
