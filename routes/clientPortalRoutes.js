@@ -926,4 +926,86 @@ router.put('/public/:slug/calculator', async (req, res) => {
   }
 });
 
+/**
+ * PUT /api/portal/public/:slug/combo-items — client Hamper Builder
+ *
+ * Lets a client save the custom combo(s) they built themselves from the
+ * catalogue (Step 4 of the Hamper Builder: "Save Combo").
+ *
+ * Body: { comboItems: [{ label?, note?, items: [{ productId }] }] }
+ *   — productId here is the portal's own productItems _id (the id the
+ *     client-facing catalogue already keys everything by), not the master
+ *     Product._id.
+ *
+ * Safety:
+ *   - Only ever replaces this client's OWN bundles (createdBy: 'client').
+ *     Any team-attached combos (createdBy: 'admin', via ComboCreator /
+ *     ClientPortalEditor) are always left untouched.
+ *   - Name/description/image/price are never trusted from the client — every
+ *     item is re-derived from the portal's own productItems snapshot, and
+ *     totalPrice is recomputed server-side, so a tampered payload can't
+ *     misrepresent what's actually in the bundle.
+ *   - Any submitted productId that isn't part of this portal's catalogue is
+ *     silently dropped; a bundle left with zero valid items is dropped too.
+ */
+router.put('/public/:slug/combo-items', async (req, res) => {
+  try {
+    const { comboItems } = req.body;
+    if (!Array.isArray(comboItems)) return res.status(400).json({ message: 'comboItems must be an array.' });
+
+    const portal = await ClientPortal.findOne({ slug: req.params.slug });
+    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+    if (portal.status === 'completed') return res.status(400).json({ message: 'This order is completed.' });
+    if (portal.type !== 'product') return res.status(400).json({ message: 'Custom hampers are only available on product portals.' });
+
+    // Team-attached combos are never touched by this route.
+    const adminCombos = (portal.comboItems || []).filter(c => c.createdBy !== 'client');
+
+    // Look up every item against the portal's own product snapshot so price,
+    // name, image, etc. always reflect what the client was actually shown.
+    const catalogue = new Map((portal.productItems || []).map(i => [String(i._id), i]));
+
+    const clientCombos = comboItems.map((combo, ci) => {
+      const items = (Array.isArray(combo.items) ? combo.items : [])
+        .map(it => catalogue.get(String(it.productId)))
+        .filter(Boolean)
+        .map((src, i) => ({
+          productId:        String(src._id),
+          name:             src.name,
+          description:      src.description     || '',
+          imageUrl:         src.imageUrl         || '',
+          additionalImages: src.additionalImages || [],
+          videoUrl:         src.videoUrl         || '',
+          price:            src.price            || 0,
+          category:         src.category         || '',
+          subCategory:      src.subCategory      || '',
+          order:            i,
+        }));
+
+      return {
+        comboId:         null,
+        label:           String(combo.label || `My Hamper ${ci + 1}`).slice(0, 80),
+        totalPrice:      items.reduce((s, it) => s + (it.price || 0), 0),
+        // Leave blank — ComboThumbGallery automatically renders a CSS mosaic
+        // collage of all the bundle's item photos whenever collageImageUrl is
+        // empty. This is exactly what already happens for admin-generated
+        // combos (comboService never sets a real collage image either), so
+        // client-built hampers get the same "combo" visual treatment for free.
+        collageImageUrl: '',
+        items,
+        note:            String(combo.note || '').slice(0, 300),
+        order:           adminCombos.length + ci,
+        createdBy:       'client',
+      };
+    }).filter(c => c.items.length > 0);
+
+    portal.comboItems = [...adminCombos, ...clientCombos];
+    await portal.save();
+    res.json({ ok: true, comboItems: portal.comboItems });
+  } catch (err) {
+    logger.error('public combo-items PUT error', { err: err.message });
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;

@@ -201,6 +201,11 @@ const clientPortalSchema = new mongoose.Schema(
       }],
       note:  { type: String, default: '' },
       order: { type: Number, default: 0 },
+      // Who built this bundle — 'admin' (team, via ComboCreator) or 'client'
+      // (built in the portal's Hamper Builder). Client-facing routes only ever
+      // touch createdBy: 'client' entries so team-attached combos are never
+      // altered by a client request.
+      createdBy: { type: String, enum: ["admin", "client"], default: "admin" },
     }],
 
     messages: [messageSchema],
