@@ -23,6 +23,12 @@ const { uploadFile, deleteFromR2 } = require('../services/r2Service');
 const { uploadSingleFileBuffer } = require('../services/msGraphService');
 const { odvPath } = require('../utils/oneDrivePaths');
 const logger = require('../utils/logger').child({ module: 'supplierRoutes' });
+// NEW — security hardening: this route previously saved req.body fields
+// straight to Mongo with no validation at all, unlike every other form in
+// the app. Mirrors the same whitelist rules as src/utils/inputValidation.js
+// on the front end — the server copy is the real boundary; the client copy
+// is only a UX nicety and can always be bypassed with a direct API call.
+const { isValidName, isValidMessage, isSafeUrl, normalizeUrl } = require('../utils/inputValidation');
 
 const MAX_ROWS = 25; // sane ceiling for one batch submission
 
@@ -62,6 +68,18 @@ const supplierVideoFolderPath = (req, productName) => {
     .replace(/[^a-zA-Z0-9 _-]/g, '').trim() || 'untitled-product';
   return odvPath('supplier folder', folderName, productFolderName);
 };
+
+// NEW — security hardening: shared field validation for both the bulk-create
+// and edit/resubmit endpoints. Returns an error string, or null if the row
+// is clean. Whitelist-based (matches the front-end mirror) rather than
+// blacklisting tag names, since tag-name blacklists are trivially bypassed.
+function validateProductFields({ brand, name, description, videoUrl }) {
+  if (!isValidName(brand)) return 'Brand contains invalid characters.';
+  if (!isValidName(name)) return 'Product name contains invalid characters.';
+  if (!isValidMessage(description)) return 'Description contains invalid characters.';
+  if (videoUrl && !isSafeUrl(videoUrl)) return 'Video URL must be a valid http(s) link.';
+  return null;
+}
 
 // ─── GET /api/suppliers/products ──────────────────────────────────────────────
 // Supplier's own submissions across all statuses (pending/approved/rejected).
@@ -138,6 +156,12 @@ router.post('/products/bulk',
             errors.push({ row: i, message: 'Brand, product name, and description are required.' });
             continue;
           }
+          // NEW — security hardening: reject before any upload/DB work happens.
+          const fieldError = validateProductFields(row);
+          if (fieldError) {
+            errors.push({ row: i, message: fieldError });
+            continue;
+          }
 
           const primary = files[`image_${i}`]?.[0];
           if (!primary) {
@@ -180,7 +204,7 @@ router.post('/products/bulk',
             imageKey: primaryUpload.key,
             additionalImages,
             additionalImageKeys,
-            videoUrl: row.videoUrl || '',
+            videoUrl: row.videoUrl ? normalizeUrl(row.videoUrl) : '',
             videoOneDrivePath,
             sellingPrice: Number(row.sellingPrice) || 0, // NEW — supplier's suggested price
             status: 'pending',
@@ -226,10 +250,23 @@ router.put('/products/:id',
       if (row.status === 'approved')
         return res.status(400).json({ message: 'Approved products can no longer be edited here.' });
 
-      row.brand = req.body.brand || row.brand;
-      row.name = req.body.name || row.name;
-      row.description = req.body.description || row.description;
-      row.videoUrl = req.body.videoUrl !== undefined ? req.body.videoUrl : row.videoUrl;
+      // NEW — security hardening: validate incoming fields before touching
+      // the document. Uses the values that WOULD be applied (falling back
+      // to the existing row value), so a partial edit can't smuggle in an
+      // unvalidated new field via an old-value fallback.
+      const nextBrand = req.body.brand || row.brand;
+      const nextName = req.body.name || row.name;
+      const nextDescription = req.body.description || row.description;
+      const nextVideoUrl = req.body.videoUrl !== undefined ? req.body.videoUrl : row.videoUrl;
+      const fieldError = validateProductFields({
+        brand: nextBrand, name: nextName, description: nextDescription, videoUrl: nextVideoUrl,
+      });
+      if (fieldError) return res.status(400).json({ message: fieldError });
+
+      row.brand = nextBrand;
+      row.name = nextName;
+      row.description = nextDescription;
+      row.videoUrl = nextVideoUrl ? normalizeUrl(nextVideoUrl) : '';
       row.sellingPrice = req.body.sellingPrice !== undefined ? Number(req.body.sellingPrice) : row.sellingPrice; // NEW
 
       const newPrimary = req.files?.image?.[0];

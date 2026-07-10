@@ -21,6 +21,7 @@ const { attachRequestId, requestLogger } = require('./middleware/requestLogger')
 const whatsappService = require('./services/whatsappService');
 const { startScheduler } = require('./services/trendingProductService');
 const { startTrackingScheduler } = require('./services/shipmentTrackingService');
+const { runActivityLogMaintenance } = require('./services/activityLogArchiveService');
 
 const allowedOrigins = [
   ...(process.env.ADMIN_URL ? process.env.ADMIN_URL.split(',').map(o => o.trim()) : []),
@@ -235,6 +236,32 @@ cron.schedule('0 10 * * *', async () => {
       outlookStatus: `Error: ${err.message}`,
       invoicesCount: 0,
     }).catch(e => cronLogger.error('WhatsApp fallback status report also failed', { error: e.message }));
+  }
+}, {
+  scheduled: true,
+  timezone: 'Asia/Kolkata',
+});
+
+// ─── CRON: Weekly Activity Log Archival ──────────────────────────────────────
+// Every Sunday at 02:00 IST — well clear of the 10:00 daily Outlook/WhatsApp
+// sync above, and before Monday's business traffic starts.
+//
+//   1. Any ActivityLog rows older than 7 days get grouped by calendar week
+//      (Mon–Sun), written to a weekly .xlsx, and uploaded to OneDrive under
+//      development/website → "activity logs folder" → "weekly excel saved".
+//      Rows are only deleted from MongoDB after their file uploads successfully.
+//   2. Archived .xlsx files on OneDrive older than 5 months are then deleted,
+//      so the OneDrive folder doesn't grow forever either.
+//
+// This keeps MongoDB's ActivityLog collection capped at ~7 days of data while
+// preserving the full history on OneDrive for up to 5 months.
+cron.schedule('0 2 * * 0', async () => {
+  cronLogger.info('Activity log maintenance started');
+  try {
+    await runActivityLogMaintenance();
+    cronLogger.info('Activity log maintenance finished');
+  } catch (err) {
+    cronLogger.error('Activity log maintenance failed', { error: err.message, stack: err.stack });
   }
 }, {
   scheduled: true,

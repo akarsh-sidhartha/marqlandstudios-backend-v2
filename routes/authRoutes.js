@@ -9,6 +9,33 @@ const { sendInviteEmail, sendPasswordResetEmail } = require('../services/emailSe
 const { validateBody } = require('../utils/inputValidation'); // NEW — security hardening
 const logger = require('../utils/logger').child({ module: 'authRoutes' });
 
+// ─── PARTNER ROUTING GUARD ────────────────────────────────────────────────────
+// Suppliers with role "partner" must never be issued admin-app credentials when
+// they're signing in from admin.marqlandstudios.com or any other subdomain of
+// marqlandstudios.com. This is enforced server-side (not just in the UI) because
+// a client-side-only check can be bypassed by anyone calling the API directly.
+const MARQLAND_ROOT_DOMAIN = 'marqlandstudios.com';
+const PARTNER_PORTAL_URL   = 'https://marqlandstudios.com/partner';
+
+const isMarqlandStudiosHost = (hostname = '') => {
+  const h = hostname.toLowerCase();
+  // Deliberately excludes the bare root domain (marqlandstudios.com) — that's
+  // where the partner portal itself lives, so matching it here would block
+  // partners from logging in on the very page we redirect them to.
+  return h.endsWith(`.${MARQLAND_ROOT_DOMAIN}`);
+};
+
+// The API's own Host header won't reflect which frontend the browser is on
+// (admin.marqlandstudios.com and api.marqlandstudios.com are different hosts),
+// so we read the browser-set Origin header instead (falling back to Referer).
+// Both are provided by the browser itself on cross-origin fetch/XHR calls and
+// can't be set by JS in the page, which is why they're suitable for this check.
+const getRequestHostname = (req) => {
+  const originHeader = req.headers.origin || req.headers.referer;
+  if (!originHeader) return null;
+  try { return new URL(originHeader).hostname; } catch { return null; }
+};
+
 // ─── TOKEN HELPERS ────────────────────────────────────────────────────────────
 
 const generateAccessToken = (user) => {
@@ -167,6 +194,21 @@ router.post('/login',
     if (!user || !(await user.comparePassword(password))) {
       logger.warn('Login failed — invalid credentials', { email: email.toLowerCase() });
       return res.status(401).json({ message: 'Invalid email or password.' });
+    }
+
+    if (user.role === 'partner') {
+      const requestHostname = getRequestHostname(req);
+      if (requestHostname && isMarqlandStudiosHost(requestHostname)) {
+        logger.warn('Partner login blocked on restricted host', {
+          userId: user._id, email: user.email, host: requestHostname
+        });
+        // Deliberately do NOT issue tokens/cookies here — the account simply
+        // isn't valid for this app, so we send a redirect instead of a session.
+        return res.status(403).json({
+          message: 'Partner accounts sign in through the partner portal.',
+          redirect: PARTNER_PORTAL_URL,
+        });
+      }
     }
 
     if (user.status === 'pending') {

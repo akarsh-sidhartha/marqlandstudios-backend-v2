@@ -130,6 +130,24 @@ const ROUTE_MAP = [
   { method: 'POST',   pattern: /^\/api\/trending-products$/,               action: 'CREATE_TRENDING',         category: 'products',  summary: r => `Added trending product: ${r.body?.name || '?'}` },
   { method: 'PUT',    pattern: /^\/api\/trending-products\/[^/]+$/,        action: 'UPDATE_TRENDING',         category: 'products',  summary: _r => `Updated trending product` },
   { method: 'DELETE', pattern: /^\/api\/trending-products\/[^/]+$/,        action: 'DELETE_TRENDING',         category: 'products',  summary: _r => `Deleted trending product` },
+
+  // ── Combos ────────────────────────────────────────────────────────────────
+  { method: 'POST',   pattern: /^\/api\/combos\/generate$/,                action: 'GENERATE_COMBOS',         category: 'combos',    summary: r => `Generated combos for budget: ${r.body?.budget || '?'}` },
+  { method: 'DELETE', pattern: /^\/api\/combos\/[^/]+$/,                   action: 'DELETE_COMBO',            category: 'combos',    summary: _r => `Deleted combo` },
+
+  // ── Supplier Portal (supplier-facing) ────────────────────────────────────
+  { method: 'POST',   pattern: /^\/api\/suppliers\/products\/bulk$/,       action: 'SUPPLIER_SUBMIT_PRODUCTS',category: 'suppliers', summary: _r => `Submitted product batch for review` },
+  { method: 'PUT',    pattern: /^\/api\/suppliers\/products\/[^/]+$/,      action: 'SUPPLIER_RESUBMIT_PRODUCT', category: 'suppliers', summary: _r => `Resubmitted product for review` },
+  { method: 'DELETE', pattern: /^\/api\/suppliers\/products\/[^/]+$/,      action: 'SUPPLIER_DELETE_PRODUCT',   category: 'suppliers', summary: _r => `Deleted product submission` },
+
+  // ── Admin — Supplier Product Review ──────────────────────────────────────
+  { method: 'PUT',    pattern: /^\/api\/admin\/supplier-products\/[^/]+\/approve$/, action: 'APPROVE_SUPPLIER_PRODUCT', category: 'suppliers', summary: _r => `Approved supplier product submission` },
+  { method: 'PUT',    pattern: /^\/api\/admin\/supplier-products\/[^/]+\/reject$/,  action: 'REJECT_SUPPLIER_PRODUCT',  category: 'suppliers', summary: r => `Rejected supplier product: ${r.body?.reason || '?'}` },
+
+  // ── Message Templates (Manage Statements) ────────────────────────────────
+  { method: 'POST',   pattern: /^\/api\/message-templates$/,               action: 'CREATE_TEMPLATE',         category: 'templates', summary: r => `Created statement template: ${(r.body?.text || '').slice(0, 50)}` },
+  { method: 'PATCH',  pattern: /^\/api\/message-templates\/[^/]+$/,        action: 'UPDATE_TEMPLATE',         category: 'templates', summary: _r => `Updated statement template` },
+  { method: 'DELETE', pattern: /^\/api\/message-templates\/[^/]+$/,        action: 'DELETE_TEMPLATE',         category: 'templates', summary: _r => `Deleted statement template` },
 ];
 
 // HTTP methods we always skip (read-only, high-volume)
@@ -153,6 +171,10 @@ const getCategory = (url) => {
   if (url.includes('/shipments'))         return 'logistics';
   if (url.includes('/shipping-partners')) return 'logistics';
   if (url.includes('/trending-products')) return 'products';
+  if (url.includes('/combos'))            return 'combos';
+  if (url.includes('/admin/supplier-products')) return 'suppliers';
+  if (url.includes('/suppliers'))         return 'suppliers';
+  if (url.includes('/message-templates')) return 'templates';
   return 'general';
 };
 

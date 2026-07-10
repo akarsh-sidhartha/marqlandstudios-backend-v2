@@ -4,15 +4,29 @@
  * Mounted at /api/logs
  * All routes require admin role (enforced below via router.use).
  *
- *   GET    /        — paginated activity log with filters
- *   GET    /stats   — summary stats for the last 7 days
- *   DELETE /purge   — delete logs older than N days (min 7, default 90)
+ *   GET    /          — paginated activity log with filters
+ *   GET    /stats     — summary stats for the last 7 days
+ *   GET    /archives  — list weekly Excel archives saved to OneDrive
+ *   DELETE /purge     — manual emergency purge of logs older than N days (min 7, default 7)
+ *
+ * NOTE ON RETENTION: as of the OneDrive archival service
+ * (services/activityLogArchiveService.js, run weekly via cron in server.js),
+ * MongoDB is automatically kept to the last ~7 days of activity logs —
+ * anything older is exported to a weekly .xlsx on OneDrive and then removed
+ * from MongoDB. The DELETE /purge route below is no longer the primary
+ * retention mechanism; it's kept as a manual/emergency tool (e.g. if the
+ * cron job is behind and an admin wants to force a purge sooner). Its
+ * default/floor was lowered from 90 → 7 days to match the new retention
+ * policy — do not raise it back up without also updating the archive job,
+ * or logs could be purged from MongoDB before they've been archived.
  */
 
 const express     = require('express');
 const router      = express.Router();
 const ActivityLog = require('../models/ActivityLog');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
+const { getOrCreateFolder, listFolderContents } = require('../services/msGraphService');
+const { odvPath }  = require('../utils/oneDrivePaths');
 const logger      = require('../utils/logger').child({ module: 'logRoutes' });
 
 // All log routes require admin — applied once here rather than on each handler
@@ -121,15 +135,43 @@ router.get('/stats', async (req, res) => {
   }
 });
 
+// ─── GET /archives — list weekly Excel archives saved to OneDrive ───────────
+router.get('/archives', async (req, res) => {
+  try {
+    const folderSegments = odvPath('activity logs folder', 'weekly excel saved');
+
+    let parentId = 'root';
+    for (const segment of folderSegments) {
+      parentId = await getOrCreateFolder(parentId, segment);
+    }
+
+    const files = (await listFolderContents(parentId))
+      .filter(f => !f.folder)
+      .map(f => ({
+        name: f.name,
+        size: f.size,
+        webUrl: f.webUrl,
+        createdDateTime: f.createdDateTime,
+      }))
+      .sort((a, b) => new Date(b.createdDateTime) - new Date(a.createdDateTime));
+
+    res.json({ folder: folderSegments.join('/'), files });
+  } catch (err) {
+    logger.error('Failed to list OneDrive activity log archives', { error: err.message, stack: err.stack });
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // ─── DELETE /purge — remove old logs ─────────────────────────────────────────
 /**
  * Query params:
- *   days  Number of days to retain (default 90, minimum 7).
- *         The floor of 7 prevents accidentally deleting recent logs.
+ *   days  Number of days to retain (default 7, minimum 7).
+ *         The floor of 7 prevents accidentally deleting recent logs, and
+ *         matches the automatic weekly-archive retention window.
  */
 router.delete('/purge', async (req, res) => {
   try {
-    const requested = parseInt(req.query.days) || 90;
+    const requested = parseInt(req.query.days) || 7;
     const days      = Math.max(7, requested); // safety floor — never purge last 7 days
 
     if (requested < 7) {
