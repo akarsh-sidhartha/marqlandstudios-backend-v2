@@ -83,6 +83,30 @@ const staticCookieOptions = () => {
   };
 };
 
+/**
+ * Cookie options for the refresh_token cookie — same cross-origin reasoning as
+ * staticCookieOptions() above, but:
+ *   - maxAge matches the refresh token's own 7-day expiry, not the access token's.
+ *   - path is scoped to /api/auth only. This cookie is only ever needed by the
+ *     /refresh and /logout endpoints, so restricting its path keeps it out of
+ *     every other request's headers (smaller exposure surface than static_token,
+ *     which legitimately does need to be sent on every /uploads/* request).
+ *
+ * SECURITY NOTE: this cookie carries the refresh token itself — httpOnly means
+ * frontend JS can never read it (an XSS payload can't exfiltrate it), which is
+ * the whole point of moving it out of localStorage.
+ */
+const refreshCookieOptions = () => {
+  const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+  return {
+    httpOnly: true,
+    secure:   IS_PRODUCTION,
+    sameSite: IS_PRODUCTION ? 'none' : 'strict',
+    path:     '/api/auth',
+    maxAge:   7 * 24 * 60 * 60 * 1000, // 7 days in ms — matches refresh token expiry
+  };
+};
+
 // ─── PUBLIC ROUTES ────────────────────────────────────────────────────────────
 
 /**
@@ -239,11 +263,15 @@ router.post('/login',
     // are on different subdomains — see staticCookieOptions() above.
     res.cookie('static_token', accessToken, staticCookieOptions());
 
+    // Set httpOnly cookie carrying the refresh token. This REPLACES returning
+    // refreshToken in the JSON body — the frontend never touches the raw refresh
+    // token, so an XSS payload reading localStorage can no longer steal it.
+    res.cookie('refresh_token', refreshToken, refreshCookieOptions());
+
     logger.info('User logged in', { userId: user._id, email: user.email, role: user.role });
     res.json({
       message:      'Login successful.',
       accessToken,
-      refreshToken,
       user: {
         id:            user._id,
         name:          user.name,
@@ -261,10 +289,12 @@ router.post('/login',
 
 /**
  * POST /api/auth/refresh
- * Issues a new access token using the stored refresh token.
+ * Issues a new access token using the refresh token stored in the httpOnly
+ * refresh_token cookie (falls back to the request body for compatibility with
+ * any non-browser API consumer that can't hold cookies).
  */
 router.post('/refresh', async (req, res) => {
-  const { refreshToken } = req.body;
+  const refreshToken = req.cookies?.refresh_token || req.body?.refreshToken;
   if (!refreshToken) return res.status(401).json({ message: 'Refresh token required.' });
 
   try {
@@ -277,12 +307,20 @@ router.post('/refresh', async (req, res) => {
     if (user.status !== 'active')
       return res.status(403).json({ message: 'Account is not active.' });
 
-    const newAccessToken = generateAccessToken(user);
+    const newAccessToken  = generateAccessToken(user);
+    const newRefreshToken = generateRefreshToken(user);
+
+    // Rotate the refresh token on every use — limits the blast radius if a
+    // stale cookie value is ever replayed.
+    user.refreshToken = newRefreshToken;
+    await user.save();
+
     logger.info('Token refreshed', { userId: user._id, role: user.role });
 
-    // Re-issue the static cookie with the new access token so file serving
-    // doesn't break mid-session after a token refresh.
+    // Re-issue both cookies with the new tokens so file serving and the next
+    // refresh cycle both keep working.
     res.cookie('static_token', newAccessToken, staticCookieOptions());
+    res.cookie('refresh_token', newRefreshToken, refreshCookieOptions());
 
     res.json({ accessToken: newAccessToken });
   } catch (err) {
@@ -321,13 +359,21 @@ router.post('/logout', authenticate, async (req, res) => {
     await User.findByIdAndUpdate(req.user.id, { refreshToken: null });
     logger.info('User logged out', { userId: req.user.id });
 
-    // Clear the static file auth cookie using the same options it was set with
-    // (sameSite + secure must match, otherwise browsers ignore clearCookie)
-    const opts = staticCookieOptions();
+    // Clear both auth cookies using the same options they were set with
+    // (sameSite + secure + path must match, otherwise browsers ignore clearCookie)
+    const staticOpts = staticCookieOptions();
     res.clearCookie('static_token', {
-      httpOnly: opts.httpOnly,
-      secure:   opts.secure,
-      sameSite: opts.sameSite,
+      httpOnly: staticOpts.httpOnly,
+      secure:   staticOpts.secure,
+      sameSite: staticOpts.sameSite,
+    });
+
+    const refreshOpts = refreshCookieOptions();
+    res.clearCookie('refresh_token', {
+      httpOnly: refreshOpts.httpOnly,
+      secure:   refreshOpts.secure,
+      sameSite: refreshOpts.sameSite,
+      path:     refreshOpts.path,
     });
 
     res.json({ message: 'Logged out successfully.' });
