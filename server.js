@@ -6,10 +6,16 @@ dotenv.config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const path = require('path');
 const cron = require('node-cron');
 const sanitizeBody = require('./middleware/sanitizeBody'); // NEW — NoSQL injection hardening (body-only, avoids express-mongo-sanitize's req.query crash)
+const sanitizeRequest = require('./middleware/security/sanitizeRequest'); // XSS/HTML stripping for body+query+params
+const { createRateLimiter } = require('./middleware/security/rateLimiter');
+const { corsOptions, helmetOptions, rateLimits } = require('./config/security');
+const errorHandler = require('./middleware/errorHandler');
+const notFoundHandler = require('./middleware/notFoundHandler');
 
 const app = express();
 
@@ -23,30 +29,17 @@ const { startScheduler } = require('./services/trendingProductService');
 const { startTrackingScheduler } = require('./services/shipmentTrackingService');
 const { runActivityLogMaintenance } = require('./services/activityLogArchiveService');
 
-const allowedOrigins = [
-  ...(process.env.ADMIN_URL ? process.env.ADMIN_URL.split(',').map(o => o.trim()) : []),
-  ...(process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map(o => o.trim()) : []),
-  'https://marqlandstudios.com',
-  'https://www.marqlandstudios.com',
-  'http://localhost:3000',
-  'http://localhost:3001',
-  'http://localhost:5000',
-];
+// ─── Security Headers ─────────────────────────────────────────────────────────
+app.use(helmet(helmetOptions));
 
-app.use(cors({
-  origin: (origin, callback) => {
-    const normalised = origin?.replace(/\/$/, '');
-    if (!normalised || allowedOrigins.includes(normalised)) {
-      callback(null, true);
-    } else {
-      logger.warn('CORS rejected request', { origin });
-      callback(new Error(`CORS policy: origin '${origin}' not allowed`));
-    }
-  },
-  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-}));
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+app.use(cors(corsOptions));
+
+// ─── Global Rate Limiting (Token Bucket) ─────────────────────────────────────
+// Applies to every request, ahead of body parsing so abusive clients are
+// rejected as cheaply as possible. Per-route limiters (e.g. /api/auth,
+// routes/exampleRoutes.js) layer a stricter bucket on top of this one.
+app.use(createRateLimiter(rateLimits.global));
 
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
@@ -57,6 +50,11 @@ app.use(cookieParser());
 // req.query/req.params, which express-mongo-sanitize crashes on in this
 // Express/Node version (getter-only accessors).
 app.use(sanitizeBody);
+
+// XSS/HTML-injection hardening — strips markup from every string in
+// body, query, AND params (mutated in place, see middleware comment for
+// why that matters on Express 5).
+app.use(sanitizeRequest);
 
 // ─── Request Logging ─────────────────────────────────────────────────────────
 // attachRequestId stamps req.requestId on every request — used by all downstream logs.
@@ -94,6 +92,8 @@ const comboRoutes = require('./routes/comboRoutes');
 const supplierRoutes = require('./routes/supplierRoutes');
 const adminSupplierRoutes = require('./routes/adminSupplierRoutes');
 const messageTemplateRoutes = require('./routes/messageTemplateRoutes');
+// Reference implementation — see routes/exampleRoutes.js
+const exampleRoutes = require('./routes/exampleRoutes');
 
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
@@ -155,7 +155,10 @@ app.use('/api/offsitecatalogues', offsiteCatalogueRoutes);
 app.use('/api/orders', orderInquiry);
 app.use('/api/challans', SamplesProvided);
 app.use('/api/inquiries', SourcingHub);
-app.use('/api/auth', authRoutes);
+// Tighter token bucket than the global one — brute-force resistance on
+// login/register/password-reset without penalizing normal API traffic.
+const authRateLimiter = createRateLimiter(rateLimits.auth);
+app.use('/api/auth', authRateLimiter, authRoutes);
 app.use('/api/payment-tracker', paymentTracker);
 app.use('/api/image-processing', imageProcessing);
 app.use('/api/trending-products', trendingProductRoutes);
@@ -170,36 +173,16 @@ app.use('/api/message-templates', messageTemplateRoutes);
 // NEW — Supplier Portal
 app.use('/api/suppliers', supplierRoutes);
 app.use('/api/admin/supplier-products', adminSupplierRoutes);
+// Reference implementation — see routes/exampleRoutes.js
+app.use('/api/examples/tasks', exampleRoutes);
 
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
-app.use((req, res, next) => {
-  if (
-    req.url.startsWith('/api') ||
-    req.url.startsWith('/public') ||
-    req.url.startsWith('/uploads')
-  ) return next();
+app.use(notFoundHandler);
 
-  logger.warn('404 — unmatched route', {
-    requestId: req.requestId,
-    method: req.method,
-    path: req.path,
-  });
-  res.status(404).json({ error: 'Not found. This is an API server.' });
-});
 // ─── Global Error Handler ─────────────────────────────────────────────────────
-app.use((err, req, res, next) => {
-  logger.error('Unhandled error reached global handler', {
-    requestId: req.requestId,
-    method: req.method,
-    path: req.path,
-    error: err.message,
-    stack: err.stack,
-    userId: req.user?.id,
-  });
-  res.status(err.status || 500).json({
-    error: IS_PRODUCTION ? 'Internal Server Error' : err.message,
-  });
-});
+// Must be the LAST app.use() — Express recognizes it as an error handler
+// by its 4-argument signature (see middleware/errorHandler.js).
+app.use(errorHandler);
 
 // ─── Background Schedulers ────────────────────────────────────────────────────
 startScheduler();         // Trending products — 02:00 IST daily

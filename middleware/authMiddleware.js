@@ -12,6 +12,7 @@ const logger = require('../utils/logger').child({ module: 'authMiddleware' });
  */
 const ROUTE_PERMISSIONS = {
   '/auth':                    null,   // ALL /api/auth/* routes are public
+  '/examples':                null,   // reference/demo endpoint — see routes/exampleRoutes.js
   '/public-site':             null,   // public-facing site routes
   '/vendors/media':           null,   // OneDrive media proxy — auth handled by Graph bearer token
   '/orders/proxy-attachment': null,   // OneDrive order attachment proxy — same pattern
