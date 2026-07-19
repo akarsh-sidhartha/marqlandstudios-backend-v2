@@ -7,7 +7,16 @@ const Invite = require('../models/Invite');
 const { authenticate, authorize } = require('../middleware/authMiddleware');
 const { sendInviteEmail, sendPasswordResetEmail } = require('../services/emailService');
 const { validateBody } = require('../utils/inputValidation'); // NEW — security hardening
+const { createRateLimiter } = require('../middleware/security/rateLimiter');
+const { rateLimits } = require('../config/security');
 const logger = require('../utils/logger').child({ module: 'authRoutes' });
+
+// CHANGED — moved here from server.js's blanket `app.use('/api/auth', authRateLimiter, ...)`
+// mount, which penalized every /api/auth/* call (including authenticated
+// admin traffic like /me, /users, /users/:id/role) with the same tight
+// bucket meant for brute-force resistance on login/registration. Now only
+// applied to the actual public, brute-forceable endpoints below.
+const authRateLimiter = createRateLimiter(rateLimits.auth);
 
 // ─── PARTNER ROUTING GUARD ────────────────────────────────────────────────────
 // Suppliers with role "partner" must never be issued admin-app credentials when
@@ -144,7 +153,7 @@ router.post('/register', async (req, res) => {
  * Frontend calls this to validate the invite token before showing the form.
  * Returns the pre-filled email so the form can lock it.
  */
-router.get('/invite/verify', async (req, res) => {
+router.get('/invite/verify', authRateLimiter, async (req, res) => {
   try {
     const { token } = req.query;
     if (!token) return res.status(400).json({ message: 'Token is required.' });
@@ -168,6 +177,7 @@ router.get('/invite/verify', async (req, res) => {
  * Register using an invite token. Email is pre-filled and locked from the token.
  */
 router.post('/invite/register',
+  authRateLimiter,
   validateBody({ name: 'name', password: 'password' }, ['token', 'name', 'password']),
   async (req, res) => {
   try {
@@ -208,6 +218,7 @@ router.post('/invite/register',
  * POST /api/auth/login
  */
 router.post('/login',
+  authRateLimiter,
   validateBody({ email: 'email', password: 'password' }, ['email', 'password']),
   async (req, res) => {
   try {
@@ -419,7 +430,7 @@ router.post('/change-password', authenticate, async (req, res) => {
  * Public. Sends a reset link to the user's email.
  * Always responds 200 — never reveals if an email is registered.
  */
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', authRateLimiter, async (req, res) => {
   const SAFE_RESPONSE = { message: 'If that email is registered, a reset link has been sent.' };
 
   try {
@@ -452,7 +463,7 @@ router.post('/forgot-password', async (req, res) => {
  * POST /api/auth/reset-password
  * Public. Validates token and sets the new password.
  */
-router.post('/reset-password', async (req, res) => {
+router.post('/reset-password', authRateLimiter, async (req, res) => {
   try {
     const { token, newPassword } = req.body;
 
@@ -588,7 +599,7 @@ router.get('/users/pending', authenticate, authorize(['admin']), async (req, res
 router.patch('/users/:id/approve', authenticate, authorize(['admin']), async (req, res) => {
   try {
     const { role } = req.body;
-    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'];
+    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier', 'jobWork'];
     if (!role || !validRoles.includes(role))
       return res.status(400).json({ message: `Role must be one of: ${validRoles.join(', ')}` });
 
@@ -611,7 +622,7 @@ router.patch('/users/:id/approve', authenticate, authorize(['admin']), async (re
 router.patch('/users/:id/role', authenticate, authorize(['admin']), async (req, res) => {
   try {
     const { role } = req.body;
-    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'];
+    const validRoles = ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier', 'jobWork'];
     if (!role || !validRoles.includes(role))
       return res.status(400).json({ message: `Role must be one of: ${validRoles.join(', ')}` });
     if (req.params.id === req.user.id && role !== 'admin')

@@ -251,14 +251,17 @@ const sendPartnerRejectionEmail = async ({ to, companyName, contactName, reason 
 /**
  * Send password reset email.
  */
-const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there', isSupplier = false) => {
+const sendPasswordResetEmail = async (toEmail, resetToken, userName = 'there', portal = 'employee') => {
   const transporter = createTransporter();
-  const appUrl = isSupplier
+  const isClientPortal = portal === 'supplier' || portal === 'jobWork';
+  const appUrl = isClientPortal
     ? (process.env.CLIENT_URL || 'http://localhost:3001')
     : (process.env.ADMIN_URL || 'http://localhost:3000');
-  const resetLink = isSupplier
+  const resetLink = portal === 'supplier'
     ? `${appUrl}/partner?reset=${resetToken}`
-    : `${appUrl}/#/?reset=${resetToken}`;
+    : portal === 'jobWork'
+      ? `${appUrl}/job-work?reset=${resetToken}`
+      : `${appUrl}/#/?reset=${resetToken}`;
 
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || `Marqland Portal <${process.env.EMAIL_USER}>`,

@@ -24,7 +24,7 @@ const inviteSchema = new mongoose.Schema({
   },
   inviteType: {
     type: String,
-    enum: ['employee', 'supplier'],
+    enum: ['employee', 'supplier', 'jobWork'],
     default: 'employee',
   },
   // MongoDB TTL index: automatically deletes this document after 48 hours

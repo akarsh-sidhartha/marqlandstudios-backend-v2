@@ -28,7 +28,7 @@ const userSchema = new mongoose.Schema({
     // intentionally NOT given any of the internal app's default route access;
     // see authMiddleware.js ROUTE_PERMISSIONS and authRoutes.js approve logic.
     type: String,
-    enum: ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier'],
+    enum: ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer', 'supplier', 'jobWork'],
     default: 'viewer', // Admin assigns the actual role on approval
   },
   status: {

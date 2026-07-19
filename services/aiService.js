@@ -5,10 +5,18 @@
  * Central AI extraction service used by paymentTrackerRoutes, invoiceRoute,
  * vendorRoutes (business card scan), and any future views.
  *
- * PROVIDER WATERFALL (tries in order, falls back on quota/error):
- *   1. Gemini   — Best accuracy. Uses GEMINI_API_KEY. Free tier = 1500 req/day.
- *   2. Mistral  — Good OCR. Uses MISTRAL_API_KEY. Free tier available.
- *   3. Tesseract— Fully free, runs locally (no API key needed). Lower accuracy.
+ * PROVIDER WATERFALL (tries free providers first, escalates only if needed):
+ *   1. Tesseract — Fully free, runs locally (no API key, no quota). Tried first —
+ *                  these documents are simple tax invoices, so plain OCR + regex
+ *                  is usually enough to find company name, invoice #, GSTIN, tax split.
+ *   2. Mistral   — Good OCR, generous free tier. Uses MISTRAL_API_KEY.
+ *   3. Gemini    — Best accuracy but the most limited/paid quota. Uses GEMINI_API_KEY.
+ *                  Only reached if the free providers didn't extract enough fields.
+ *
+ * A result only "passes" a provider and skips the rest of the waterfall once it
+ * has enough of the fields we actually care about (see isInvoiceSufficient /
+ * isCardSufficient). Otherwise the best partial result seen so far is kept as a
+ * fallback and the next provider is tried.
  *
  * USAGE:
  *   const { extractFromDocument, extractFromBusinessCard, checkAIStatus } = require('./aiService');
@@ -133,7 +141,16 @@ const callMistral = async (base64Data, mimeType, prompt, extraImages = []) => {
 };
 
 // ── Provider 3: TESSERACT (local OCR — no API key needed) ─────────────────────
-const callTesseract = async (base64Data) => {
+const callTesseract = async (base64Data, mimeType) => {
+  // tesseract.js's recognize() only handles raster images. Handed a PDF, it
+  // doesn't reject its promise — it throws inside a worker thread as an
+  // unhandled 'error' event, which Node treats as an uncaught exception and
+  // crashes the whole process. Fail fast here (a normal, catchable rejection)
+  // instead of ever handing it a non-image buffer.
+  if (mimeType && !mimeType.startsWith('image/')) {
+    throw new Error(`Tesseract cannot OCR mimeType "${mimeType}" — image input required`);
+  }
+
   let Tesseract;
   try {
     Tesseract = require('tesseract.js');
@@ -265,51 +282,74 @@ Rules:
 // PUBLIC API
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const extractFromDocument = async (base64Data, mimeType) => {
-  const pureBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
-  const errors     = [];
+/**
+ * Runs a list of providers in priority order, stopping at the first one whose
+ * result passes `isSufficient`. If none pass, the best partial result seen is
+ * returned (still more useful to the caller than nothing) — the waterfall
+ * only throws if every provider errored outright with no usable result at all.
+ *
+ * Replaces three near-identical try/catch/fallback chains (invoice extraction,
+ * business card extraction, and previously duplicated per-provider blocks)
+ * with one place that encodes "try free providers, escalate if needed".
+ *
+ * @param {Array<{name: string, available: () => boolean, run: () => Promise<object>}>} providers
+ * @param {(result: object) => boolean} isSufficient
+ */
+const runProviderWaterfall = async (providers, isSufficient) => {
+  const errors = [];
+  let bestResult   = null;
+  let bestProvider = null;
 
-  if (process.env.GEMINI_API_KEY) {
+  for (const { name, available, run } of providers) {
+    if (!available()) { errors.push({ provider: name, reason: 'no_key' }); continue; }
     try {
-      const result = await callGemini(pureBase64, mimeType, INVOICE_PROMPT);
-      logger.debug('Document extracted via Gemini');
-      return { ...result, _provider: 'gemini' };
+      const result = await run();
+      if (isSufficient(result)) return { result, provider: name };
+      if (!bestResult) { bestResult = result; bestProvider = name; }
+      errors.push({ provider: name, reason: 'insufficient_fields' });
+      logger.warn(`${name} extraction didn't meet the quality bar — trying next provider`, { name });
     } catch (err) {
       const reason = err.isQuotaError ? 'quota_exceeded' : err.message;
-      errors.push({ provider: 'gemini', reason });
-      logger.warn('Gemini extraction failed — trying Mistral', { reason });
+      errors.push({ provider: name, reason });
+      logger.warn(`${name} extraction failed — trying next provider`, { reason });
     }
-  } else {
-    errors.push({ provider: 'gemini', reason: 'no_key' });
   }
 
-  if (process.env.MISTRAL_API_KEY) {
-    try {
-      const prompt = mimeType === 'application/pdf'
-        ? INVOICE_PROMPT + '\nNote: This may be a PDF rendered as image.'
-        : INVOICE_PROMPT;
-      const result = await callMistral(pureBase64, mimeType, prompt);
-      logger.debug('Document extracted via Mistral');
-      return { ...result, _provider: 'mistral' };
-    } catch (err) {
-      errors.push({ provider: 'mistral', reason: err.message });
-      logger.warn('Mistral extraction failed — trying Tesseract', { error: err.message });
-    }
-  } else {
-    errors.push({ provider: 'mistral', reason: 'no_key' });
-  }
-
-  try {
-    const result = await callTesseract(pureBase64);
-    logger.info('Document extracted via Tesseract (fallback)');
-    return result;
-  } catch (err) {
-    errors.push({ provider: 'tesseract', reason: err.message });
-  }
+  if (bestResult) return { result: bestResult, provider: bestProvider, partial: true };
 
   const summary = errors.map(e => `${e.provider}:${e.reason}`).join(', ');
-  logger.error('All AI providers failed for document extraction', { errors });
+  logger.error('All AI providers failed', { errors });
   throw new Error(`All AI providers failed. Errors: ${summary}`);
+};
+
+/** Enough of the fields we actually need — company, invoice #, GSTIN, and at least one amount. */
+const REQUIRED_INVOICE_FIELDS = ['vendor_name', 'invoice_number', 'vendor_gst'];
+const isInvoiceSufficient = (result) => {
+  if (!result) return false;
+  const fieldsHit = REQUIRED_INVOICE_FIELDS.filter((k) => result[k]).length;
+  const hasAmount = [result.total_amount, result.cgst, result.sgst, result.igst].some((v) => v != null && v !== '');
+  return fieldsHit >= 2 && hasAmount;
+};
+
+const isCardSufficient = (result) =>
+  !!(result && (result.company_name || result.name) && (result.phone || result.email));
+
+const extractFromDocument = async (base64Data, mimeType) => {
+  const pureBase64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+  const mistralPrompt = mimeType === 'application/pdf'
+    ? INVOICE_PROMPT + '\nNote: This may be a PDF rendered as image.'
+    : INVOICE_PROMPT;
+
+  const providers = [
+    { name: 'tesseract', available: () => mimeType?.startsWith('image/') ?? false, run: () => callTesseract(pureBase64, mimeType) },
+    { name: 'mistral',   available: () => !!process.env.MISTRAL_API_KEY,   run: () => callMistral(pureBase64, mimeType, mistralPrompt) },
+    { name: 'gemini',    available: () => !!process.env.GEMINI_API_KEY,    run: () => callGemini(pureBase64, mimeType, INVOICE_PROMPT) },
+  ];
+
+  const { result, provider, partial } = await runProviderWaterfall(providers, isInvoiceSufficient);
+  if (partial) logger.warn('No provider met the quality bar for this document — returning best-effort result', { provider });
+  else logger.debug(`Document extracted via ${provider}`);
+  return { ...result, _provider: provider };
 };
 
 /**
@@ -318,9 +358,8 @@ const extractFromDocument = async (base64Data, mimeType) => {
  * @param {string} base64Data   — base64 (with or without data-URI prefix) of the FRONT image
  * @param {string} [backImageData] — optional base64 of the BACK image
  *
- * Both Gemini and Mistral receive front + back together so the AI can merge
- * information from both sides (e.g. company on front, email on back).
- * Tesseract runs OCR on both images and concatenates the text before parsing.
+ * All providers receive front + back together (or OCR both, for Tesseract) so
+ * information can be merged from both sides (e.g. company on front, email on back).
  */
 const extractFromBusinessCard = async (base64Data, backImageData = null) => {
   const stripPrefix = (b64) => (b64 && b64.includes(',') ? b64.split(',')[1] : b64);
@@ -328,55 +367,41 @@ const extractFromBusinessCard = async (base64Data, backImageData = null) => {
   const frontBase64 = stripPrefix(base64Data);
   const backBase64  = backImageData ? stripPrefix(backImageData) : null;
   const mimeType    = 'image/jpeg';
+  const extraImages = backBase64 ? [{ base64: backBase64, mimeType }] : [];
 
-  // Build extraImages array for providers that support multi-image
-  const extraImages = backBase64
-    ? [{ base64: backBase64, mimeType }]
-    : [];
-
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      const result = await callGemini(frontBase64, mimeType, BUSINESS_CARD_PROMPT, extraImages);
-      logger.debug('Business card extracted via Gemini', { sides: extraImages.length + 1 });
-      return { ...result, _provider: 'gemini' };
-    } catch (err) {
-      logger.warn('Gemini card scan failed — trying Mistral', { error: err.message });
-    }
-  }
-
-  if (process.env.MISTRAL_API_KEY) {
-    try {
-      const result = await callMistral(frontBase64, mimeType, BUSINESS_CARD_PROMPT, extraImages);
-      logger.debug('Business card extracted via Mistral', { sides: extraImages.length + 1 });
-      return { ...result, _provider: 'mistral' };
-    } catch (err) {
-      logger.warn('Mistral card scan failed — trying Tesseract', { error: err.message });
-    }
-  }
-
-  // Tesseract: OCR both sides, concatenate text, then parse
-  try {
+  const recogniseTesseract = async () => {
     const Tesseract = require('tesseract.js');
     const recognise = async (b64) => {
-      const { data: { text } } = await Tesseract.recognize(
-        Buffer.from(b64, 'base64'), 'eng', { logger: () => {} }
-      );
+      const { data: { text } } = await Tesseract.recognize(Buffer.from(b64, 'base64'), 'eng', { logger: () => {} });
       return text;
     };
-
     const frontText = await recognise(frontBase64);
     const backText  = backBase64 ? await recognise(backBase64) : '';
-    const combined  = [frontText, backText].filter(Boolean).join('\n');
+    return extractCardFieldsFromText([frontText, backText].filter(Boolean).join('\n'));
+  };
 
-    logger.info('Business card extracted via Tesseract (fallback)', { sides: backBase64 ? 2 : 1 });
-    return extractCardFieldsFromText(combined);
-  } catch (err) {
-    logger.error('All AI providers failed for business card', { error: err.message });
-    throw new Error('All AI providers failed for business card scan.');
-  }
+  const providers = [
+    { name: 'tesseract', available: () => true,                          run: recogniseTesseract },
+    { name: 'mistral',   available: () => !!process.env.MISTRAL_API_KEY, run: () => callMistral(frontBase64, mimeType, BUSINESS_CARD_PROMPT, extraImages) },
+    { name: 'gemini',    available: () => !!process.env.GEMINI_API_KEY,  run: () => callGemini(frontBase64, mimeType, BUSINESS_CARD_PROMPT, extraImages) },
+  ];
+
+  const { result, provider } = await runProviderWaterfall(providers, isCardSufficient);
+  return { ...result, _provider: provider };
 };
 
 const checkAIStatus = async () => {
+  try {
+    require('tesseract.js');
+    return { available: true, provider: 'tesseract', reason: 'ok' };
+  } catch {
+    // tesseract.js not installed — fall through to the paid providers below
+  }
+
+  if (process.env.MISTRAL_API_KEY) {
+    return { available: true, provider: 'mistral', reason: 'ok' };
+  }
+
   if (process.env.GEMINI_API_KEY) {
     try {
       const models = await getGeminiModels(process.env.GEMINI_API_KEY);
@@ -389,23 +414,13 @@ const checkAIStatus = async () => {
       return { available: true, provider: 'gemini', reason: 'ok' };
     } catch (err) {
       if (err.response?.status === 429) {
-        logger.info('Gemini quota exceeded — falling back to Mistral/Tesseract');
-        if (process.env.MISTRAL_API_KEY) return { available: true, provider: 'mistral', reason: 'gemini_quota_exceeded' };
-        return { available: true, provider: 'tesseract', reason: 'gemini_quota_exceeded' };
+        logger.info('Gemini quota exceeded and no free provider configured');
+        return { available: false, provider: 'gemini', reason: 'gemini_quota_exceeded' };
       }
     }
   }
 
-  if (process.env.MISTRAL_API_KEY) {
-    return { available: true, provider: 'mistral', reason: 'gemini_unavailable' };
-  }
-
-  try {
-    require('tesseract.js');
-    return { available: true, provider: 'tesseract', reason: 'ai_apis_unavailable' };
-  } catch {
-    return { available: false, provider: 'none', reason: 'no_providers_available' };
-  }
+  return { available: false, provider: 'none', reason: 'no_providers_available' };
 };
 
 module.exports = { extractFromDocument, extractFromBusinessCard, checkAIStatus };

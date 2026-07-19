@@ -126,8 +126,15 @@ const proformaInvoiceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Round to paise before deriving amountDue — amountPaid is built up via repeated
+// `+=` additions across payments, so raw floats drift (e.g. 99999.99999999998),
+// which left amountDue a hair above 0 on fully-paid PIs and broke exact-zero
+// checks (progress bar color, "fully paid" status) even though nothing was owed.
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
 proformaInvoiceSchema.pre('save', function () {
-  this.amountDue = Math.max(0, this.totalAmount - this.amountPaid);
+  this.amountPaid = round2(this.amountPaid);
+  this.amountDue  = Math.max(0, round2(this.totalAmount - this.amountPaid));
   // Only auto-set payment-driven states; preserve 'invoiced' and 'cancelled'
   if (this.status === 'invoiced' || this.status === 'cancelled') return;
   if (this.amountPaid <= 0)    this.status = 'pending';
@@ -216,7 +223,8 @@ const vendorInvoiceSchema = new mongoose.Schema(
 );
 
 vendorInvoiceSchema.pre('save', function () {
-  this.amountDue = Math.max(0, this.totalAmount - this.amountPaid);
+  this.amountPaid = round2(this.amountPaid);
+  this.amountDue  = Math.max(0, round2(this.totalAmount - this.amountPaid));
   if (this.amountPaid <= 0)    this.status = 'pending';
   else if (this.amountDue > 0) this.status = 'partial';
   else                          this.status = 'paid';

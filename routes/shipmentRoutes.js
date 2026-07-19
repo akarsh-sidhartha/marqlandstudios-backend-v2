@@ -42,10 +42,15 @@ router.get('/', async (req, res) => {
 });
 
 // ─── GET /:id ─────────────────────────────────────────────────────────────────
+// CHANGED — security hardening: a courier could previously fetch ANY shipment
+// by ID even though the list view (GET /) already scoped them to their own.
+// Ownership is now enforced here too, matching the list filter.
 router.get('/:id', async (req, res) => {
   try {
     const shipment = await Shipment.findById(req.params.id).lean();
     if (!shipment) return res.status(404).json({ message: 'Shipment not found.' });
+    if (req.user?.role === 'courier' && String(shipment.vendorId) !== String(req.user.id))
+      return res.status(404).json({ message: 'Shipment not found.' });
     res.json(shipment);
   } catch (err) {
     logger.error('Failed to fetch shipment', { shipmentId: req.params.id, error: err.message, stack: err.stack });
@@ -111,10 +116,21 @@ router.post('/bulk', async (req, res) => {
 });
 
 // ─── PUT /:id ─────────────────────────────────────────────────────────────────
+// CHANGED — security hardening: couriers could previously edit ANY shipment.
+// Now restricted to shipments they own (vendorId === their own id); a courier
+// also can't reassign a shipment to a different vendorId via the body.
 router.put('/:id', async (req, res) => {
   try {
     const body = { ...req.body };
     if (!body.orderId) body.orderId = null;
+
+    if (req.user?.role === 'courier') {
+      const existing = await Shipment.findById(req.params.id).lean();
+      if (!existing || String(existing.vendorId) !== String(req.user.id))
+        return res.status(404).json({ message: 'Shipment not found.' });
+      body.vendorId   = req.user.id;
+      body.vendorName = req.user.name || req.user.email;
+    }
 
     const shipment = await Shipment.findByIdAndUpdate(req.params.id, body, { new: true });
     if (!shipment) return res.status(404).json({ message: 'Shipment not found.' });
@@ -127,8 +143,16 @@ router.put('/:id', async (req, res) => {
 });
 
 // ─── DELETE /:id ──────────────────────────────────────────────────────────────
+// CHANGED — security hardening: couriers restricted to deleting their own
+// shipments, same ownership check as GET/PUT above.
 router.delete('/:id', async (req, res) => {
   try {
+    if (req.user?.role === 'courier') {
+      const existing = await Shipment.findById(req.params.id).lean();
+      if (!existing || String(existing.vendorId) !== String(req.user.id))
+        return res.status(404).json({ message: 'Shipment not found.' });
+    }
+
     const shipment = await Shipment.findByIdAndDelete(req.params.id);
     if (!shipment) return res.status(404).json({ message: 'Shipment not found.' });
     logger.info('Shipment deleted', { shipmentId: req.params.id, userId: req.user?.id });
@@ -140,7 +164,12 @@ router.delete('/:id', async (req, res) => {
 });
 
 // ─── POST /refresh-status ─────────────────────────────────────────────────────
+// CHANGED — restricted to internal staff; this triggers a system-wide
+// tracking refresh across ALL shipments, not something a single courier
+// vendor should be able to trigger.
 router.post('/refresh-status', async (req, res) => {
+  if (req.user?.role === 'courier')
+    return res.status(403).json({ message: 'Not permitted for this role.' });
   try {
     logger.info('Shipment status refresh triggered', { userId: req.user?.id });
     const result = await refreshShipmentStatuses();

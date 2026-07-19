@@ -29,6 +29,7 @@ const { startScheduler } = require('./services/trendingProductService');
 const { startTrackingScheduler } = require('./services/shipmentTrackingService');
 const { runActivityLogMaintenance } = require('./services/activityLogArchiveService');
 
+
 // ─── Security Headers ─────────────────────────────────────────────────────────
 app.use(helmet(helmetOptions));
 
@@ -94,7 +95,8 @@ const adminSupplierRoutes = require('./routes/adminSupplierRoutes');
 const messageTemplateRoutes = require('./routes/messageTemplateRoutes');
 // Reference implementation — see routes/exampleRoutes.js
 const exampleRoutes = require('./routes/exampleRoutes');
-
+const jobWorkVendorRoutes = require('./routes/job-work/jobWorkVendorRoutes');
+const jobWorkAdminRoutes  = require('./routes/job-work/jobWorkAdminRoutes');
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
@@ -155,10 +157,19 @@ app.use('/api/offsitecatalogues', offsiteCatalogueRoutes);
 app.use('/api/orders', orderInquiry);
 app.use('/api/challans', SamplesProvided);
 app.use('/api/inquiries', SourcingHub);
-// Tighter token bucket than the global one — brute-force resistance on
-// login/register/password-reset without penalizing normal API traffic.
-const authRateLimiter = createRateLimiter(rateLimits.auth);
-app.use('/api/auth', authRateLimiter, authRoutes);
+// CHANGED — the tighter auth token bucket now applies per-route INSIDE
+// authRoutes.js (only to the actual brute-forceable public endpoints:
+// /login, /forgot-password, /reset-password, /invite/register,
+// /invite/verify) instead of blanket-covering the whole /api/auth/* prefix.
+// The blanket mount was penalizing normal authenticated admin traffic
+// (/me, /users, /invites, /users/:id/role, /users/:id/approve, ...) with
+// the same ~1-request-per-30s bucket meant for login attempts — a single
+// page refresh could exhaust it. Those routes now rely on the global
+// limiter above (120 burst, ~2/sec sustained) plus their own
+// authenticate/authorize(['admin']) check, matching this comment's
+// original intent of brute-force resistance "without penalizing normal
+// API traffic."
+app.use('/api/auth', authRoutes);
 app.use('/api/payment-tracker', paymentTracker);
 app.use('/api/image-processing', imageProcessing);
 app.use('/api/trending-products', trendingProductRoutes);
@@ -176,6 +187,9 @@ app.use('/api/admin/supplier-products', adminSupplierRoutes);
 // Reference implementation — see routes/exampleRoutes.js
 app.use('/api/examples/tasks', exampleRoutes);
 
+app.use('/api/job-work', jobWorkVendorRoutes);
+app.use('/api/admin/job-work', jobWorkAdminRoutes);
+
 // ─── 404 Handler ─────────────────────────────────────────────────────────────
 app.use(notFoundHandler);
 
@@ -187,6 +201,7 @@ app.use(errorHandler);
 // ─── Background Schedulers ────────────────────────────────────────────────────
 startScheduler();         // Trending products — 02:00 IST daily
 startTrackingScheduler(); // Shipment tracking — every 2 hours
+require('./services/job-work/jobWorkLifecycleService').startScheduler();
 
 // ─── CRON: Daily Outlook + WhatsApp Sync ─────────────────────────────────────
 const cronLogger = logger.child({ module: 'cron' });

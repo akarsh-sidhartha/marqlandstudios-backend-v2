@@ -67,10 +67,20 @@ const uploadToOneDrive = async (folderPath, filename, buffer, mimeType) => {
   return { fileId: result.fileId, webUrl: result.webUrl };
 };
 
+const extFromMime = (mimeType) =>
+  mimeType === 'application/pdf' ? 'pdf' : mimeType?.startsWith('image/') ? mimeType.split('/')[1].replace('jpeg', 'jpg') : 'bin';
+
+// Two sanitize levels used throughout this file's filename-building:
+//  - basic: strip anything that isn't alnum/underscore/hyphen
+//  - full:  basic + collapse repeated underscores + trim leading/trailing ones
+//           (used for vendor names, which tend to produce runs of underscores)
+const basicSanitize = (s) => (s || '').replace(/[^a-z0-9_\-]/gi, '_');
+const fullSanitize   = (s) => basicSanitize(s).replace(/_+/g, '_').replace(/^_|_$/g, '');
+
 const buildFilename = (ref, vendorName, mimeType) => {
-  const ext      = mimeType === 'application/pdf' ? 'pdf' : mimeType?.startsWith('image/') ? mimeType.split('/')[1].replace('jpeg', 'jpg') : 'bin';
-  const safeRef  = (ref || 'FILE').replace(/[^a-z0-9_\-]/gi, '_');
-  const safeVend = (vendorName || '').replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  const ext      = extFromMime(mimeType);
+  const safeRef  = basicSanitize(ref) || 'FILE';
+  const safeVend = fullSanitize(vendorName);
   return safeVend ? `${safeRef}_${safeVend}.${ext}` : `${safeRef}.${ext}`;
 };
 
@@ -522,17 +532,17 @@ router.post('/payments', uploadMem.single('screenshot'), async (req, res) => {
           const vDoc = await Vendor.findById(vendor).select('companyName').lean();
           if (vDoc) vendorName = vDoc.companyName;
         }
-        const ext          = req.file.mimetype === 'application/pdf' ? 'pdf' : req.file.mimetype?.startsWith('image/') ? req.file.mimetype.split('/')[1].replace('jpeg', 'jpg') : 'bin';
-        const cleanVendor  = vendorName.replace(/[^a-z0-9_\-]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'UnknownVendor';
-        const cleanRef     = paymentRef.replace(/[^a-z0-9_\-]/gi, '_');
+        const ext          = extFromMime(req.file.mimetype);
+        const cleanVendor  = fullSanitize(vendorName) || 'UnknownVendor';
+        const cleanRef     = basicSanitize(paymentRef);
 
         if (mappedTo === 'proforma_invoice' && piId) {
           const pi     = await ProformaInvoice.findById(piId).select('piNumber').lean();
-          const cleanPi = (pi?.piNumber || 'PI').replace(/[^a-z0-9_\-]/gi, '_');
+          const cleanPi = basicSanitize(pi?.piNumber || 'PI');
           screenshotName = `${cleanVendor}_${cleanPi}_${cleanRef}.${ext}`;
         } else if (mappedTo === 'vendor_invoice' && viId) {
           const vi      = await Invoice.findById(viId).select('invoice_number').lean();
-          const cleanInv = (vi?.invoice_number || 'INV').replace(/[^a-z0-9_\-]/gi, '_');
+          const cleanInv = basicSanitize(vi?.invoice_number || 'INV');
           screenshotName = `${cleanVendor}_${cleanInv}_${cleanRef}.${ext}`;
         } else {
           screenshotName = `${cleanVendor}_${Math.floor(1000 + Math.random() * 9000)}_${cleanRef}.${ext}`;

@@ -16,11 +16,18 @@ const ROUTE_PERMISSIONS = {
   '/public-site':             null,   // public-facing site routes
   '/vendors/media':           null,   // OneDrive media proxy — auth handled by Graph bearer token
   '/orders/proxy-attachment': null,   // OneDrive order attachment proxy — same pattern
+  '/job-work/media':          null,   // OneDrive job-work image proxy — same pattern; MUST stay above '/job-work' below (first-prefix-match wins)
   // NEW: Supplier Portal — suppliers can only ever hit /api/suppliers/*.
   // They deliberately do NOT get access to '/products' (that stays
   // internal-roles-only below) so a supplier account can never read/write
   // the live catalogue directly, only their own staging rows.
   '/suppliers':                ['supplier'],
+  // NEW: Job Work Portal — vendors can only ever hit /api/job-work/*.
+  '/job-work':                 ['jobWork'],
+  // NEW: admin review queue for job-work submissions — open to internal
+  // staff roles (not just admin) so "Job Work" can be assigned like any
+  // other route via UserManagement.js's per-user route checkboxes.
+  '/admin/job-work':           ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer'],
   '/products':                ['inventory', 'sales', 'accounts', 'admin'],
   // NEW: admin review queue for supplier submissions — admin only.
   '/admin/supplier-products':  ['admin'],
