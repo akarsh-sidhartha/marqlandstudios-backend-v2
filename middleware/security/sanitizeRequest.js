@@ -46,9 +46,12 @@ const richTextFieldsForRoute = (req) => {
   return config ? config.fields : EMPTY_FIELD_SET;
 };
 
+// HOTFIX: <img> is intentionally NOT whitelisted. Pasted screenshots were
+// stored as multi-MB base64 data URIs inside the description and shipped
+// with every GET /api/orders, which made the orders page time out.
+// Descriptions are text (with basic formatting) only; files go in attachments.
 const RICH_TEXT_XSS_OPTIONS = {
   whiteList: {
-    img: ['src', 'style', 'alt'],
     br: [],
     div: ['style'],
     p: ['style'],

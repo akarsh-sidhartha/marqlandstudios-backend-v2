@@ -97,11 +97,20 @@ const makePortalSlug = () =>
 // Attachment metadata (name, type, size, webUrl, downloadUrl) is stored on the
 // DB record and populated at creation / edit time. The live OneDrive folder is
 // only re-fetched when an order is opened (see /:id/attachments).
+// HOTFIX: drop any <img> tags still stored in old descriptions (pasted
+// base64 screenshots) so they can't bloat the list response. Run
+// scripts/stripDescriptionImages.js once to remove them from the DB too.
+const IMG_TAG = /<img\b[^>]*>/gi;
+
 router.get('/', async (req, res) => {
   try {
     const orders = await OrderInquiry.find().sort({ updatedAt: -1 }).lean();
     logger.debug('Orders listed', { count: orders.length, userId: req.user?.id });
-    res.json(orders.map(o => ({ ...o, attachments: o.attachments || [] })));
+    res.json(orders.map(o => ({
+      ...o,
+      description: typeof o.description === 'string' ? o.description.replace(IMG_TAG, '') : o.description,
+      attachments: o.attachments || [],
+    })));
   } catch (err) {
     logger.error('Orders list failed', { error: err.message, stack: err.stack });
     res.status(500).json([]);
