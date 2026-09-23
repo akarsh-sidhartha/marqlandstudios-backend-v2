@@ -295,6 +295,200 @@ router.get('/order/:orderId', async (req, res) => {
   }
 });
 
+/**
+ * Re-sync portal items from their source records after a change:
+ *   offsite → roomCategories from Property
+ *   product → additionalImages / videoUrl / imageUrl / price from Product
+ * Non-fatal: a failure is logged and the portal keeps its saved items.
+ * (Extracted unchanged from PUT /:slug/items so the add/remove routes below
+ * behave exactly the same.)
+ */
+const enrichPortalItems = async (portal) => {
+  if (portal.type === 'offsite' && (portal.offsiteItems || []).length > 0) {
+    try {
+      const propIds = portal.offsiteItems.map(i => i.propertyId).filter(Boolean);
+      if (propIds.length > 0) {
+        const properties = await Property.find({ _id: { $in: propIds } }).lean();
+        const propMap    = new Map(properties.map(p => [p._id.toString(), p]));
+        portal.offsiteItems = portal.offsiteItems.map(item => {
+          const src = propMap.get(String(item.propertyId));
+          if (!src) return item;
+          const roomCategories = (src.roomCategories || []).map(rc => ({
+            _id: rc._id, name: rc.name,
+            singlePrice: rc.singlePrice || 0, doublePrice: rc.doublePrice || 0, triplePrice: rc.triplePrice || 0,
+          }));
+          return { ...(item.toObject ? item.toObject() : { ...item }), roomCategories };
+        });
+        await portal.save();
+      }
+    } catch (enrichErr) {
+      console.warn('[items PUT offsite-enrich] skipped:', enrichErr.message);
+    }
+  }
+
+  if (portal.type === 'product' && (portal.productItems || []).length > 0) {
+    try {
+      const ids      = portal.productItems.map(i => i.productId).filter(Boolean);
+      const products = await Product.find({ _id: { $in: ids } }).lean();
+      const pMap     = new Map(products.map(p => [p._id.toString(), p]));
+      portal.productItems = portal.productItems.map(item => {
+        const src = pMap.get(item.productId);
+        if (!src) return item;
+        return {
+          ...(item.toObject ? item.toObject() : { ...item }),
+          additionalImages: src.additionalImages || [],
+          videoUrl:         src.videoUrl         || '',
+          imageUrl:         src.imageUrl         || item.imageUrl,
+          price: src.price != null ? Number(src.price) : calcSellPrice(src.purchasePrice, src.markupPercent),
+        };
+      });
+      await portal.save();
+    } catch (syncErr) {
+      console.warn('[items PUT auto-sync] skipped:', syncErr.message);
+    }
+  }
+
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// "ADD TO PORTAL" PICKER ROUTES (ProductList / PropertyList → usePortalItems)
+//
+// The picker only needs order rows, so it no longer downloads every portal's
+// full item list (4+ MB). Items are loaded per portal on expand, and adding /
+// removing is done on the server — the browser never sends the whole list back,
+// so two people adding to the same portal can't overwrite each other.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const itemsKeyFor = (portal) => (portal.type === 'offsite' ? 'offsiteItems' : 'productItems');
+const sourceIdOf  = (portal, item) => String((portal.type === 'offsite' ? item.propertyId : item.productId) || '');
+
+/** Row summary for the picker: counts + source ids (for "already added"). */
+const toPickerRow = (portal, orderStatus) => {
+  const items = portal[itemsKeyFor(portal)] || [];
+  return {
+    _id:           portal._id,
+    slug:          portal.slug,
+    type:          portal.type,
+    title:         portal.title,
+    orderRef:      portal.orderRef,
+    clientName:    portal.clientName,
+    orderPlacedBy: portal.orderPlacedBy,
+    status:        portal.status,
+    orderId:       portal.orderId,
+    orderStatus:   orderStatus || 'unknown',
+    itemCount:     items.length,
+    itemIds:       items.map((i) => sourceIdOf(portal, i)).filter(Boolean),
+  };
+};
+
+/**
+ * GET /api/portal/picker?type=product|offsite
+ * Active portals whose order is still open (inquiry/ongoing) or has no order.
+ * Returns row details only — no item content.
+ */
+router.get('/picker', async (req, res) => {
+  try {
+    const type = req.query.type === 'offsite' ? 'offsite' : 'product';
+    const idField = type === 'offsite' ? 'offsiteItems.propertyId' : 'productItems.productId';
+
+    const portals = await ClientPortal.find({ type, status: 'active' })
+      .select(`slug type title orderRef clientName orderPlacedBy status orderId ${idField}`)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const orders = await OrderInquiry.find(
+      { _id: { $in: portals.map((p) => p.orderId).filter(Boolean) } },
+      { status: 1 }
+    ).lean();
+    const statusById = new Map(orders.map((o) => [String(o._id), o.status]));
+
+    const rows = portals
+      .map((p) => toPickerRow(p, statusById.get(String(p.orderId))))
+      .filter((r) => ['inquiry', 'ongoing', 'unknown'].includes(r.orderStatus));
+
+    res.json(rows);
+  } catch (err) {
+    logger.error('Portal picker list failed', { error: err.message });
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * GET /api/portal/:slug/items
+ * Light item list for one portal (shown when a picker row is expanded).
+ */
+router.get('/:slug/items', async (req, res) => {
+  try {
+    const portal = await ClientPortal.findOne({ slug: req.params.slug })
+      .select('type productItems._id productItems.productId productItems.name productItems.imageUrl ' +
+              'offsiteItems._id offsiteItems.propertyId offsiteItems.name offsiteItems.imageUrl')
+      .lean();
+    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+    res.json(portal[itemsKeyFor(portal)] || []);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * POST /api/portal/:slug/items/add   body: { items: [ ...new items ] }
+ * Appends items on the server. Items whose productId/propertyId is already in
+ * the portal are skipped; custom items (no source id) are always added.
+ * Returns the updated picker row.
+ */
+router.post('/:slug/items/add', async (req, res) => {
+  try {
+    const incoming = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!incoming.length) return res.status(400).json({ message: 'No items to add.' });
+
+    const portal = await ClientPortal.findOne({ slug: req.params.slug });
+    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+
+    const key = itemsKeyFor(portal);
+    const existing = new Set((portal[key] || []).map((i) => sourceIdOf(portal, i)).filter(Boolean));
+    const toAdd = incoming.filter((item) => {
+      const id = sourceIdOf(portal, item);
+      if (!id) return true;          // custom item
+      if (existing.has(id)) return false;
+      existing.add(id);              // also de-dupes within the request
+      return true;
+    });
+
+    if (toAdd.length) {
+      portal[key].push(...toAdd);
+      await portal.save();
+      await enrichPortalItems(portal);
+    }
+
+    logger.info('Portal items added', { slug: portal.slug, added: toAdd.length, skipped: incoming.length - toAdd.length, userId: req.user?.id });
+    res.json({ added: toAdd.length, skipped: incoming.length - toAdd.length, row: toPickerRow(portal.toObject()) });
+  } catch (err) {
+    logger.error('Portal items add failed', { slug: req.params.slug, error: err.message });
+    res.status(500).json({ message: err.message });
+  }
+});
+
+/**
+ * DELETE /api/portal/:slug/items/:itemId
+ * Removes one item (by the item's own _id). Returns the updated picker row.
+ */
+router.delete('/:slug/items/:itemId', async (req, res) => {
+  try {
+    const portal = await ClientPortal.findOne({ slug: req.params.slug });
+    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+
+    const key = itemsKeyFor(portal);
+    const before = portal[key].length;
+    portal[key] = portal[key].filter((i) => String(i._id) !== String(req.params.itemId));
+    if (portal[key].length === before) return res.status(404).json({ message: 'Item not found in this portal.' });
+
+    await portal.save();
+    res.json({ removed: 1, row: toPickerRow(portal.toObject()) });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 /** PUT /api/portal/:slug/items (UNCHANGED) */
 router.put('/:slug/items', async (req, res) => {
   try {
@@ -307,49 +501,7 @@ router.put('/:slug/items', async (req, res) => {
 
     await portal.save();
 
-    if (portal.type === 'offsite' && (portal.offsiteItems || []).length > 0) {
-      try {
-        const propIds = portal.offsiteItems.map(i => i.propertyId).filter(Boolean);
-        if (propIds.length > 0) {
-          const properties = await Property.find({ _id: { $in: propIds } }).lean();
-          const propMap    = new Map(properties.map(p => [p._id.toString(), p]));
-          portal.offsiteItems = portal.offsiteItems.map(item => {
-            const src = propMap.get(String(item.propertyId));
-            if (!src) return item;
-            const roomCategories = (src.roomCategories || []).map(rc => ({
-              _id: rc._id, name: rc.name,
-              singlePrice: rc.singlePrice || 0, doublePrice: rc.doublePrice || 0, triplePrice: rc.triplePrice || 0,
-            }));
-            return { ...(item.toObject ? item.toObject() : { ...item }), roomCategories };
-          });
-          await portal.save();
-        }
-      } catch (enrichErr) {
-        console.warn('[items PUT offsite-enrich] skipped:', enrichErr.message);
-      }
-    }
-
-    if (portal.type === 'product' && (portal.productItems || []).length > 0) {
-      try {
-        const ids      = portal.productItems.map(i => i.productId).filter(Boolean);
-        const products = await Product.find({ _id: { $in: ids } }).lean();
-        const pMap     = new Map(products.map(p => [p._id.toString(), p]));
-        portal.productItems = portal.productItems.map(item => {
-          const src = pMap.get(item.productId);
-          if (!src) return item;
-          return {
-            ...(item.toObject ? item.toObject() : { ...item }),
-            additionalImages: src.additionalImages || [],
-            videoUrl:         src.videoUrl         || '',
-            imageUrl:         src.imageUrl         || item.imageUrl,
-            price: src.price != null ? Number(src.price) : calcSellPrice(src.purchasePrice, src.markupPercent),
-          };
-        });
-        await portal.save();
-      } catch (syncErr) {
-        console.warn('[items PUT auto-sync] skipped:', syncErr.message);
-      }
-    }
+    await enrichPortalItems(portal);
 
     res.json(portal);
   } catch (err) {
