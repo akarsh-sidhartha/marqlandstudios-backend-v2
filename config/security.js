@@ -28,7 +28,10 @@ const corsOptions = {
     }
   },
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
+  // Readable by the front ends: request tracing, rate-limit back-off, and
+  // the status URL returned alongside 202 Accepted.
+  exposedHeaders: ['X-Request-Id', 'Retry-After', 'Location', 'Idempotent-Replayed'],
   credentials: true,
 };
 

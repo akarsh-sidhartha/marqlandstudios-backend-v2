@@ -20,6 +20,9 @@ const validate = (schemas = {}) => (req, res, next) => {
     const schema = schemas[key];
     if (!schema) continue;
 
+    // Express 5 leaves req.body undefined when a request has no body (e.g. a
+    // bare DELETE) — give schemas an object to validate/default into.
+    if (key === 'body' && req.body === undefined) req.body = {};
     const result = schema.safeParse(req[key]);
     if (!result.success) {
       const details = result.error.issues.map((issue) => ({

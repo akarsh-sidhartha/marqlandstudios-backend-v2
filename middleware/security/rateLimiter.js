@@ -95,6 +95,7 @@ const createRateLimiter = ({
   refillPerSec,
   keyGenerator = defaultKeyGenerator,
   message = 'Too many requests. Please slow down and try again shortly.',
+  skip = null, // (req) => boolean — requests that have their own dedicated limiter
 } = {}) => {
   if (!capacity || !refillPerSec) {
     throw new Error('createRateLimiter requires capacity and refillPerSec');
@@ -102,6 +103,7 @@ const createRateLimiter = ({
   const store = new InMemoryBucketStore({ capacity, refillPerSec });
 
   return (req, res, next) => {
+    if (skip && skip(req)) return next();
     const key = keyGenerator(req);
     const { allowed, retryAfterSec, remaining } = store.consume(key);
 

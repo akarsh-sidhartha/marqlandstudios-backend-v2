@@ -38,6 +38,10 @@ const { authenticate, authorize } = require('../middleware/authMiddleware');
 const upload       = require('../middleware/upload');          // ← NEW
 const logger       = require('../utils/logger').child({ module: 'clientPortalRoutes' });
 const { sendPortalEmail } = require('../services/emailService');
+const { videoStreamFor } = require('../services/catalog/productService');   // NEW — OneDrive video playback
+const { videoView } = require('../services/media/productMediaService');
+const { requestTimeout } = require('../middleware/requestTimeout');
+const { removeProductsFromPortals } = require('../services/catalog/portalCleanupService');  // NEW — deleted products leave portals
 
 // ── Web Push setup (UNCHANGED) ────────────────────────────────────────────────
 let webpush = null;
@@ -145,6 +149,30 @@ const sendPushToAll = async (payload) => {
 // ── Price calculator helper (UNCHANGED) ──────────────────────────────────────
 const calcSellPrice = (purchasePrice, markupPercent) =>
   Math.round(parseFloat(purchasePrice || 0) * (1 + parseFloat(markupPercent || 0) / 100));
+
+/**
+ * NEW — the fields of a portal item that always follow the live catalogue
+ * Product. Portal items are snapshots taken when a product is added to an
+ * order; overlaying these on every read means an edit made later by the
+ * Marqland team OR by the partner who supplied the product (description,
+ * price, images, video) shows up in every client portal that already
+ * contains it — no manual "sync" needed. Team price overrides live in
+ * calculatorState.priceOverride and are unaffected.
+ */
+const LIVE_PRODUCT_FIELDS = 'name description imageUrl additionalImages videoSource videoUrl videoOneDriveItemId videoOneDrivePath category subCategory purchasePrice markupPercent';
+
+const liveProductFields = (src) => {
+  const video = videoView(src);
+  return {
+    name:             src.name        || '',
+    description:      src.description || '',
+    imageUrl:         src.imageUrl    || '',
+    additionalImages: src.additionalImages || [],
+    videoSource:      video.source,
+    videoUrl:         video.source === 'link' ? (src.videoUrl || '') : '',
+    price:            calcSellPrice(src.purchasePrice, src.markupPercent),
+  };
+};
 
 /**
  * NEW HELPER — build attachment shape from cloud result + original multer file.
@@ -267,20 +295,11 @@ router.get('/order/:orderId', async (req, res) => {
             if (fixed !== item.imageUrl) { dirty = true; return { ...(item.toObject ? item.toObject() : { ...item }), imageUrl: fixed }; }
             return item;
           }
-          const fixedUrl = src.imageUrl || normaliseImageUrl(item.imageUrl);
-          const changed  =
-            JSON.stringify(item.additionalImages || []) !== JSON.stringify(src.additionalImages || []) ||
-            (item.videoUrl || '') !== (src.videoUrl || '') ||
-            fixedUrl !== item.imageUrl;
+          const live    = { ...liveProductFields(src), imageUrl: src.imageUrl || normaliseImageUrl(item.imageUrl) };
+          const changed = Object.keys(live).some(k => JSON.stringify(item[k] ?? '') !== JSON.stringify(live[k] ?? ''));
           if (!changed) return item;
           dirty = true;
-          return {
-            ...(item.toObject ? item.toObject() : { ...item }),
-            additionalImages: src.additionalImages || [],
-            videoUrl:         src.videoUrl         || '',
-            imageUrl:         fixedUrl,
-            price: src.price != null ? Number(src.price) : calcSellPrice(src.purchasePrice, src.markupPercent),
-          };
+          return { ...(item.toObject ? item.toObject() : { ...item }), ...live };
         });
 
         if (dirty) await portal.save();
@@ -336,10 +355,8 @@ const enrichPortalItems = async (portal) => {
         if (!src) return item;
         return {
           ...(item.toObject ? item.toObject() : { ...item }),
-          additionalImages: src.additionalImages || [],
-          videoUrl:         src.videoUrl         || '',
-          imageUrl:         src.imageUrl         || item.imageUrl,
-          price: src.price != null ? Number(src.price) : calcSellPrice(src.purchasePrice, src.markupPercent),
+          ...liveProductFields(src),
+          imageUrl: src.imageUrl || item.imageUrl,
         };
       });
       await portal.save();
@@ -667,12 +684,9 @@ router.post('/:slug/sync-products', async (req, res) => {
       synced++;
       return {
         ...(item.toObject ? item.toObject() : { ...item }),
-        name:             src.name             || item.name,
-        description:      src.description      || item.description,
-        imageUrl:         src.imageUrl         || item.imageUrl,
-        additionalImages: src.additionalImages  || [],
-        videoUrl:         src.videoUrl          || '',
-        price: src.price != null ? Number(src.price) : calcSellPrice(src.purchasePrice, src.markupPercent),
+        ...liveProductFields(src),
+        name:             src.name        || item.name,
+        imageUrl:         src.imageUrl    || item.imageUrl,
         category:         src.category    || item.category,
         subCategory:      src.subCategory || item.subCategory,
       };
@@ -904,36 +918,83 @@ router.post('/admin/fix-image-paths', authenticate, authorize(['admin']), async 
 // PUBLIC ROUTES — no auth, client-facing
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/** GET /api/portal/public/:slug (UNCHANGED) */
-router.get('/public/:slug', async (req, res) => {
+/**
+ * GET /api/portal/public/:slug
+ * CHANGED — product items (and the items inside combo bundles) are overlaid
+ * with the LIVE catalogue product on every load, so edits made after the
+ * product was added to this order (by the team or by the partner) are what
+ * the client sees. Items whose product was since deleted keep their snapshot.
+ */
+router.get('/public/:slug', requestTimeout(10_000), async (req, res) => {
   try {
     const portal = await ClientPortal.findOne({ slug: req.params.slug }).lean();
     if (!portal) return res.status(404).json({ message: 'This link is invalid or has expired.' });
 
     let productItems = portal.productItems || [];
-    if (productItems.length > 0) {
-      const productIds = productItems.filter(i => i.productId).map(i => i.productId);
-      if (productIds.length > 0) {
-        const products   = await Product.find(
-          { _id: { $in: productIds } },
-          'category subCategory imageUrl additionalImages'
-        ).lean();
-        const productMap = new Map(products.map(p => [p._id.toString(), p]));
-        productItems = productItems.map(item => {
-          if (!item.productId) return item;
-          const src = productMap.get(item.productId);
-          if (!src) return item;
-          return {
-            ...item,
-            imageUrl:         src.imageUrl         || item.imageUrl         || '',
-            additionalImages: src.additionalImages  || item.additionalImages || [],
-            category:    item.category    || src.category    || '',
-            subCategory: item.subCategory || src.subCategory || '',
-          };
-        });
+    let comboItems   = portal.comboItems   || [];
+
+    // Client-built hampers store the portal item _id; team combos store the Product id.
+    const itemById   = new Map(productItems.map(i => [String(i._id), i]));
+    // A hamper entry pointing at a CUSTOM portal item (no catalogue product)
+    // resolves to null, so it is never looked up or treated as deleted.
+    const sourceIdOf = (productId) => {
+      const item = itemById.get(String(productId));
+      return item ? (item.productId || null) : productId;
+    };
+
+    const ids = [
+      ...productItems.map(i => i.productId),
+      ...comboItems.flatMap(c => (c.items || []).map(it => sourceIdOf(it.productId))),
+    ].filter(id => id && mongoose.Types.ObjectId.isValid(String(id)));
+
+    if (ids.length > 0) {
+      const uniqueIds  = [...new Set(ids.map(String))];
+      const products   = await Product.find({ _id: { $in: uniqueIds } }, LIVE_PRODUCT_FIELDS).lean();
+      const productMap = new Map(products.map(p => [p._id.toString(), p]));
+
+      // NEW — products deleted from the catalogue are no longer shown, and are
+      // removed from this portal for good (covers products deleted before
+      // deletion started cleaning portals up). Custom items have no productId
+      // and are never affected.
+      const deletedIds = uniqueIds.filter(id => !productMap.has(id));
+      if (deletedIds.length) {
+        const deleted = new Set(deletedIds);
+        const removedItemIds = new Set(productItems.filter(i => deleted.has(String(i.productId || ''))).map(i => String(i._id)));
+        const isGone = (pid) => deleted.has(String(pid || '')) || removedItemIds.has(String(pid || ''));
+        productItems = productItems.filter(i => !removedItemIds.has(String(i._id)));
+        comboItems = comboItems
+          .map(c => {
+            const items = (c.items || []).filter(it => !isGone(sourceIdOf(it.productId)) && !isGone(it.productId));
+            return items.length === (c.items || []).length ? c : { ...c, items };
+          })
+          .filter(c => c.items.length > 0);
+        portal.shortlistedIds = (portal.shortlistedIds || []).filter(id => !isGone(id));
+        removeProductsFromPortals(deletedIds)
+          .catch(err => logger.warn('Portal cleanup of deleted products failed', { slug: portal.slug, error: err.message }));
       }
+
+      productItems = productItems.map(item => {
+        const src = item.productId && productMap.get(String(item.productId));
+        if (!src) return item;
+        return {
+          ...item,
+          ...liveProductFields(src),
+          imageUrl:    src.imageUrl    || item.imageUrl || '',
+          category:    item.category    || src.category    || '',
+          subCategory: item.subCategory || src.subCategory || '',
+        };
+      });
+
+      comboItems = comboItems.map(combo => {
+        const items = (combo.items || []).map(it => {
+          const src = productMap.get(String(sourceIdOf(it.productId)));
+          return src ? { ...it, ...liveProductFields(src), imageUrl: src.imageUrl || it.imageUrl || '' } : it;
+        });
+        return { ...combo, items, totalPrice: items.reduce((sum, it) => sum + (Number(it.price) || 0), 0) };
+      });
     }
 
+    res.set('Cache-Control', 'no-store');
     res.json({
       slug:            portal.slug,
       type:            portal.type,
@@ -945,7 +1006,7 @@ router.get('/public/:slug', async (req, res) => {
       teamNote:        portal.teamNote,
       productItems,
       offsiteItems:    portal.offsiteItems    || [],
-      comboItems:      portal.comboItems      || [],   // ← combo bundles for the Combo tab
+      comboItems,                                        // ← combo bundles for the Combo tab
       messages:        portal.messages        || [],
       status:          portal.status,
       completedAt:     portal.completedAt,
@@ -954,7 +1015,46 @@ router.get('/public/:slug', async (req, res) => {
       calculatorState: portal.calculatorState || {},
     });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    logger.error('Public portal load failed', { slug: req.params.slug, error: err.message });
+    res.status(500).json({ message: 'Could not load this page. Please refresh.' });
+  }
+});
+
+/**
+ * NEW — GET /api/portal/public/:slug/products/:productId/video-stream
+ * Short-lived playable URL for a product video uploaded to OneDrive.
+ * Public (clients have no login), so it only answers for products that are
+ * actually part of THIS portal — a slug can't be used to probe other
+ * products. :productId may be the catalogue Product id or the portal item id.
+ * Response: { url, expiresInSeconds }
+ */
+router.get('/public/:slug/products/:productId/video-stream', requestTimeout(10_000), async (req, res) => {
+  try {
+    const portal = await ClientPortal.findOne({ slug: req.params.slug }, 'productItems._id productItems.productId comboItems.items.productId').lean();
+    if (!portal) return res.status(404).json({ message: 'Portal not found.' });
+
+    const wanted     = String(req.params.productId);
+    const byItemId   = new Map((portal.productItems || []).map(i => [String(i._id), String(i.productId || '')]));
+    const productIds = new Set([
+      ...(portal.productItems || []).map(i => String(i.productId || '')),
+      ...(portal.comboItems || []).flatMap(c => (c.items || []).map(it => byItemId.get(String(it.productId)) || String(it.productId || ''))),
+    ].filter(Boolean));
+
+    const productId = productIds.has(wanted) ? wanted : byItemId.get(wanted);
+    if (!productId || !productIds.has(productId) || !mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(404).json({ message: 'Video not found.' });
+    }
+
+    const product = await Product.findById(productId, 'videoSource videoUrl videoOneDriveItemId videoOneDrivePath videoFileName').lean();
+    if (!product) return res.status(404).json({ message: 'Video not found.' });
+
+    const stream = await videoStreamFor(product);
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ url: stream.url, expiresInSeconds: stream.expiresInSeconds, source: stream.source });
+  } catch (err) {
+    const status = err.statusCode || 500;
+    if (status >= 500) logger.warn('Portal video stream failed', { slug: req.params.slug, productId: req.params.productId, error: err.message });
+    res.status(status).json({ message: status === 404 ? 'Video not found.' : 'Video temporarily unavailable.' });
   }
 });
 
@@ -1128,6 +1228,7 @@ router.put('/public/:slug/combo-items', async (req, res) => {
           imageUrl:         src.imageUrl         || '',
           additionalImages: src.additionalImages || [],
           videoUrl:         src.videoUrl         || '',
+          videoSource:      src.videoSource      || '',
           price:            src.price            || 0,
           category:         src.category         || '',
           subCategory:      src.subCategory      || '',

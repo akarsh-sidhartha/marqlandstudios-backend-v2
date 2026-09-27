@@ -46,6 +46,9 @@ const productItemSchema = new mongoose.Schema(
     additionalImages: { type: [String], default: [] },
     // YouTube or brand video URL — embedded in client portal card
     videoUrl: { type: String, default: "" },
+    // 'link' → play videoUrl; 'upload' → OneDrive file, played through
+    // GET /api/portal/public/:slug/products/:productId/video-stream
+    videoSource: { type: String, default: "" },
     price: { type: Number, default: 0 },
     category: { type: String, default: "" },
     subCategory: { type: String, default: "" },
@@ -194,6 +197,7 @@ const clientPortalSchema = new mongoose.Schema(
         imageUrl:         { type: String, default: '' },
         additionalImages: { type: [String], default: [] },
         videoUrl:         { type: String, default: '' },
+        videoSource:      { type: String, default: '' },
         price:            { type: Number, default: 0 },
         category:         { type: String, default: '' },
         subCategory:      { type: String, default: '' },

@@ -40,7 +40,11 @@ app.use(cors(corsOptions));
 // Applies to every request, ahead of body parsing so abusive clients are
 // rejected as cheaply as possible. Per-route limiters (e.g. /api/auth,
 // routes/exampleRoutes.js) layer a stricter bucket on top of this one.
-app.use(createRateLimiter(rateLimits.global));
+// Upload chunks are exempt here — they have their own per-user bucket in
+// routes/v2/index.js, so a 500 MB video (≈125 chunks) can't lock a user out
+// of the rest of the API.
+const isUploadChunk = (req) => req.method === 'PUT' && /^\/api\/v2\/uploads\/[^/]+\/chunks$/.test(req.path);
+app.use(createRateLimiter({ ...rateLimits.global, skip: isUploadChunk }));
 
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
@@ -95,6 +99,15 @@ const adminSupplierRoutes = require('./routes/adminSupplierRoutes');
 const messageTemplateRoutes = require('./routes/messageTemplateRoutes');
 // Reference implementation — see routes/exampleRoutes.js
 const exampleRoutes = require('./routes/exampleRoutes');
+// NEW — v2 API: standard envelope, strict timeouts, background jobs (routes/v2/index.js)
+const v2Routes = require('./routes/v2');
+const jobQueue = require('./lib/jobs/jobQueue');
+const { registerMediaJobs } = require('./services/media/mediaJobs');
+const { registerCatalogJobs } = require('./services/catalog/catalogJobs');
+const uploadSessions = require('./services/media/uploadSessionService');
+const { cleanupStagedImages } = require('./services/media/productMediaService');
+registerMediaJobs();
+registerCatalogJobs();
 const jobWorkVendorRoutes = require('./routes/job-work/jobWorkVendorRoutes');
 const jobWorkAdminRoutes  = require('./routes/job-work/jobWorkAdminRoutes');
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
@@ -119,6 +132,11 @@ mongoose.connect(MONGO_URI)
   .then(() => {
     const dbName = MONGO_URI.split('/').pop().split('?')[0];
     logger.info('MongoDB connected', { database: dbName });
+    // Background workers only start polling once the database is reachable.
+    jobQueue.start();
+    // Tag products approved before partner links were stored (idempotent).
+    require('./services/catalog/productService').backfillPartnerLinks()
+      .catch(err => logger.warn('Partner link backfill failed', { error: err.message }));
   })
   .catch(err => {
     logger.error('MongoDB connection failed', { error: err.message, stack: err.stack });
@@ -148,6 +166,7 @@ app.use('/api', (req, res, next) => {
 });
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
+app.use('/api/v2', v2Routes);
 app.use('/api/products', productRoutes);
 app.use('/api/vendors', vendorRoutes);
 app.use('/api/clients', clientRoutes);
@@ -266,10 +285,24 @@ cron.schedule('0 2 * * 0', async () => {
   timezone: 'Asia/Kolkata',
 });
 
+// ─── CRON: Upload / staged-media cleanup ─────────────────────────────────────
+// Every 30 min: delete temp files of abandoned chunked uploads and R2 images
+// that were uploaded in a product form but never saved.
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    await uploadSessions.cleanupExpired();
+    await cleanupStagedImages();
+  } catch (err) {
+    cronLogger.error('Media cleanup failed', { error: err.message });
+  }
+}, { scheduled: true, timezone: 'Asia/Kolkata' });
+
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 const shutdown = async (signal) => {
   logger.info(`${signal} received — shutting down gracefully`);
   try {
+    // Hand running background jobs back to the queue before disconnecting.
+    await jobQueue.stop();
     await mongoose.disconnect();
     logger.info('MongoDB disconnected cleanly');
   } catch (err) {
@@ -295,7 +328,7 @@ process.on('uncaughtException', (err) => {
 // ─── Server Startup ───────────────────────────────────────────────────────────
 //const HOST = '0.0.0.0';
 const PORT = process.env.PORT || 3000;
-app.listen(PORT,() => {
+const server = app.listen(PORT,() => {
   console.log('SERVER STARTED ON PORT', PORT); // raw console, not logger
   logger.info('API server started', {
     env: IS_PRODUCTION ? 'production' : 'development',
@@ -303,3 +336,10 @@ app.listen(PORT,() => {
     apiBase: IS_PRODUCTION ? 'https://api.marqlandstudios.com' : `http://localhost:${PORT}`,
   });
 });
+
+// Transport-level limits so no connection can hang forever. Individual
+// /api/v2 routes answer far sooner (middleware/requestTimeout.js); these
+// only bound the legacy single-request upload routes and idle sockets.
+server.headersTimeout = 30_000;          // client must send headers within 30s
+server.requestTimeout = 10 * 60 * 1000;  // whole request (incl. legacy large uploads) ≤ 10 min
+server.keepAliveTimeout = 65_000;        // > typical LB idle timeout (60s)

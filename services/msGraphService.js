@@ -365,6 +365,7 @@ const getMonthName = (date) =>
 
 module.exports = {
   getAccessToken,
+  driveBase,
   getOrCreateFolder,
   buildOrderFolderHierarchy,
   uploadFiles,

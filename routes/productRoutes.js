@@ -24,6 +24,7 @@ const { processProductImage } = require('../services/imageProcessingService');
 const upload       = require('../middleware/upload');
 const { deleteFromR2, uploadBuffer, resolveFolder } = require('../services/r2Service');
 const logger       = require('../utils/logger').child({ module: 'productRoutes' });
+const { removeProductsFromPortals } = require('../services/catalog/portalCleanupService'); // NEW — deleted products leave client portals
 
 // ─── Shared: resolve AI prompt ────────────────────────────────────────────────
 async function resolvePrompt(promptText, promptId, category) {
@@ -253,6 +254,8 @@ router.delete('/:id', async (req, res) => {
     }
 
     await Product.findByIdAndDelete(req.params.id);
+    // NEW — remove it from every client portal / combo it was added to.
+    await removeProductsFromPortals([req.params.id]);
     logger.info('Product deleted', { productId: req.params.id, name: product.name, userId: req.user?.id });
     res.json({ message: 'Product deleted.' });
   } catch (err) {

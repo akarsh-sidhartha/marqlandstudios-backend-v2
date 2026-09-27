@@ -36,10 +36,22 @@ const supplierProductSchema = new mongoose.Schema({
   additionalImages: { type: [String], default: [] },
   additionalImageKeys: { type: [String], default: [] },
 
-  // Either a pasted URL (YouTube etc.) OR an uploaded file path on OneDrive.
-  // Only one will typically be populated.
+  // Either a pasted URL (YouTube etc.) OR an uploaded file on OneDrive.
+  // videoSource says which one is live ('' on legacy rows = infer from the
+  // populated field). Uploaded files are sent to OneDrive by a background
+  // job; videoUpload tracks that job so the portal can show its progress.
+  videoSource: { type: String, enum: ['', 'link', 'upload'], default: '' },
   videoUrl: { type: String, default: '' },
   videoOneDrivePath: { type: String, default: '' },
+  videoOneDriveItemId: { type: String, default: '' },
+  videoFileName: { type: String, default: '' },
+  videoUpload: {
+    status: { type: String, enum: ['idle', 'processing', 'failed'], default: 'idle' },
+    jobId: { type: String, default: '' },
+    fileName: { type: String, default: '' },
+    error: { type: String, default: '' },
+    updatedAt: { type: Date, default: null },
+  },
 
   status: {
     type: String,
@@ -66,6 +78,36 @@ const supplierProductSchema = new mongoose.Schema({
   // and PendingSupplierApprovals.js, which prefills from this value).
   sellingPrice: { type: Number, default: 0 },
 
+  // ── Edits to an APPROVED (live) product ─────────────────────────────────
+  // A partner's change to a live product does not touch the catalogue
+  // straight away. The proposed version is kept here and goes through the
+  // same admin approval queue; the live Product (and every client portal
+  // showing it) keeps the approved version until the change is approved.
+  //   revisionStatus 'pending'  → waiting for admin review
+  //                  'rejected' → admin rejected it (revisionRejectionReason)
+  //                  'none'     → no outstanding change
+  pendingRevision: {
+    type: new mongoose.Schema({
+      brand: { type: String, default: '' },
+      name: { type: String, default: '' },
+      description: { type: String, default: '' },
+      sellingPrice: { type: Number, default: 0 },
+      imageUrl: { type: String, default: '' },
+      imageKey: { type: String, default: '' },
+      additionalImages: { type: [String], default: [] },
+      additionalImageKeys: { type: [String], default: [] },
+      videoSource: { type: String, enum: ['', 'link', 'upload'], default: '' },
+      videoUrl: { type: String, default: '' },
+      videoOneDriveItemId: { type: String, default: '' },
+      videoOneDrivePath: { type: String, default: '' },
+      videoFileName: { type: String, default: '' },
+    }, { _id: false }),
+    default: null,
+  },
+  revisionStatus: { type: String, enum: ['none', 'pending', 'rejected'], default: 'none', index: true },
+  revisionRejectionReason: { type: String, default: '' },
+  revisionSubmittedAt: { type: Date, default: null },
+
   reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   reviewedAt: { type: Date, default: null },
 
@@ -75,5 +117,7 @@ const supplierProductSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 supplierProductSchema.index({ supplier: 1, status: 1 });
+supplierProductSchema.index({ supplier: 1, updatedAt: -1 });
+supplierProductSchema.index({ convertedProductId: 1 });
 
 module.exports = mongoose.model('SupplierProduct', supplierProductSchema);

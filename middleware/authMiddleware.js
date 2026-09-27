@@ -29,6 +29,14 @@ const ROUTE_PERMISSIONS = {
   // other route via UserManagement.js's per-user route checkboxes.
   '/admin/job-work':           ['admin', 'accounts', 'sales', 'inventory', 'courier', 'viewer'],
   '/products':                ['inventory', 'sales', 'accounts', 'admin'],
+  // NEW — v2 API (routes/v2/index.js). Partners only reach their own
+  // /v2/supplier/* rows; the shared media/upload/job endpoints are open to
+  // partners and internal staff and scope every query to the caller.
+  '/v2/supplier':              ['supplier'],
+  '/v2/products':              ['inventory', 'sales', 'accounts', 'admin'],
+  '/v2/media':                 ['supplier', 'inventory', 'sales', 'accounts', 'admin'],
+  '/v2/uploads':               ['supplier', 'inventory', 'sales', 'accounts', 'admin'],
+  '/v2/jobs':                  ['supplier', 'inventory', 'sales', 'accounts', 'admin'],
   // NEW: admin review queue for supplier submissions — admin only.
   '/admin/supplier-products':  ['admin'],
   '/vendors':                 ['accounts', 'admin'],
