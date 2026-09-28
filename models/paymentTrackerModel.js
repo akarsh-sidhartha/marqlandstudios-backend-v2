@@ -127,20 +127,66 @@ const proformaInvoiceSchema = new mongoose.Schema(
 );
 
 // Round to paise before deriving amountDue — amountPaid is built up via repeated
-// `+=` additions across payments, so raw floats drift (e.g. 99999.99999999998),
+// additions across payments, so raw floats drift (e.g. 99999.99999999998),
 // which left amountDue a hair above 0 on fully-paid PIs and broke exact-zero
 // checks (progress bar color, "fully paid" status) even though nothing was owed.
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+/**
+ * PI status is DERIVED, never set by hand (except 'cancelled'):
+ *   cancelled   — sticky, set explicitly
+ *   invoiced    — the vendor's final tax invoice has been linked
+ *   fully_paid / partial / pending — from amountPaid vs totalAmount
+ * The same rule exists twice — as JS for document saves and as an
+ * aggregation expression for atomic balance updates (applyPayment) — and the
+ * two are kept side by side here so they can't drift apart.
+ */
+const derivePiStatus = ({ status, finalInvoice, amountPaid, amountDue }) => {
+  if (status === 'cancelled') return 'cancelled';
+  if (finalInvoice || status === 'invoiced') return 'invoiced';
+  if (amountPaid <= 0) return 'pending';
+  return amountDue > 0 ? 'partial' : 'fully_paid';
+};
+
+const PI_STATUS_EXPR = {
+  $switch: {
+    branches: [
+      { case: { $eq: ['$status', 'cancelled'] }, then: 'cancelled' },
+      { case: { $or: [{ $ne: [{ $ifNull: ['$finalInvoice', null] }, null] }, { $eq: ['$status', 'invoiced'] }] }, then: 'invoiced' },
+      { case: { $lte: ['$amountPaid', 0] }, then: 'pending' },
+      { case: { $gt: ['$amountDue', 0] }, then: 'partial' },
+    ],
+    default: 'fully_paid',
+  },
+};
+
 proformaInvoiceSchema.pre('save', function () {
   this.amountPaid = round2(this.amountPaid);
   this.amountDue  = Math.max(0, round2(this.totalAmount - this.amountPaid));
-  // Only auto-set payment-driven states; preserve 'invoiced' and 'cancelled'
-  if (this.status === 'invoiced' || this.status === 'cancelled') return;
-  if (this.amountPaid <= 0)    this.status = 'pending';
-  else if (this.amountDue > 0) this.status = 'partial';
-  else                          this.status = 'fully_paid';
+  this.status     = derivePiStatus(this);
 });
+
+/**
+ * Atomically add `delta` (negative to reverse) to a PI's amountPaid and
+ * re-derive amountDue + status in the same write — no read-modify-write race
+ * when two payments land at once.
+ *
+ * With `guard: true` the update only matches while the PI is not cancelled
+ * and the new total stays within totalAmount (+₹1 rounding tolerance);
+ * returns null when the guard rejects it, so callers can report the balance.
+ */
+proformaInvoiceSchema.statics.applyPayment = function (piId, delta, { guard = false } = {}) {
+  const filter = { _id: piId };
+  if (guard) {
+    filter.status = { $ne: 'cancelled' };
+    filter.$expr = { $lte: [{ $add: ['$amountPaid', delta] }, { $add: ['$totalAmount', 1] }] };
+  }
+  return this.findOneAndUpdate(filter, [
+    { $set: { amountPaid: { $max: [0, { $round: [{ $add: ['$amountPaid', delta] }, 2] }] } } },
+    { $set: { amountDue: { $max: [0, { $round: [{ $subtract: ['$totalAmount', '$amountPaid'] }, 2] }] } } },
+    { $set: { status: PI_STATUS_EXPR, updatedAt: '$$NOW' } },
+  ], { returnDocument: 'after', updatePipeline: true });
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PAYMENT SCHEMA
@@ -233,8 +279,11 @@ vendorInvoiceSchema.pre('save', function () {
 // ── Indexes ───────────────────────────────────────────────────────────────────
 proformaInvoiceSchema.index({ createdAt: -1 });
 proformaInvoiceSchema.index({ vendor: 1, status: 1 });
+proformaInvoiceSchema.index({ finalInvoice: 1 });
 paymentSchema.index({ paymentDate: -1 });
 paymentSchema.index({ vendor: 1, paymentDate: -1 });
+paymentSchema.index({ proformaInvoice: 1 });
+paymentSchema.index({ vendorInvoice: 1 });
 
 // ── Exports ───────────────────────────────────────────────────────────────────
 const Invoice        = mongoose.model('Invoice',        InvoiceSchema);
@@ -242,4 +291,4 @@ const ProformaInvoice = mongoose.model('ProformaInvoice', proformaInvoiceSchema)
 const Payment        = mongoose.model('Payment',        paymentSchema);
 const VendorInvoice  = mongoose.model('VendorInvoice',  vendorInvoiceSchema);
 
-module.exports = { Invoice, ProformaInvoice, Payment, VendorInvoice };
+module.exports = { Invoice, ProformaInvoice, Payment, VendorInvoice, derivePiStatus };

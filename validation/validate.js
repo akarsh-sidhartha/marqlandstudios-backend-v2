@@ -36,6 +36,9 @@ const validate = (schemas = {}) => (req, res, next) => {
     // throws), so validated/coerced values are copied back onto the
     // existing object instead of replacing req[key] wholesale.
     Object.assign(req[key], result.data);
+    // The exact schema output — unknown keys stripped. Controllers that must
+    // not pass client-only fields through (mass assignment) read from here.
+    req.validated = { ...(req.validated || {}), [key]: result.data };
   }
   next();
 };
