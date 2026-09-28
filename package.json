@@ -4,7 +4,7 @@
   "description": "API server for marqlandstudios-admin and marqlandstudios-client",
   "main": "server.js",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "scripts": {
     "start": "node server.js",
