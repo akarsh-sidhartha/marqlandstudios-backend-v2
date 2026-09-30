@@ -22,5 +22,37 @@ const detectMime = (buffer) => {
 };
 
 const DOCUMENT_MIMES = new Set(SIGNATURES.map((s) => s.mime));
+const IMAGE_MIMES = new Set([...DOCUMENT_MIMES].filter((m) => m.startsWith('image/')));
 
-module.exports = { detectMime, DOCUMENT_MIMES };
+// Office formats have no signature of their own: OOXML is a ZIP, legacy
+// Office is an OLE compound file. The container is sniffed from the bytes and
+// the extension only picks which Office type it is — a renamed .exe still fails.
+const ZIP = (b) => b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04;
+const OLE = (b) => b.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+const OFFICE_BY_EXT = {
+  xlsx: [ZIP, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  docx: [ZIP, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  pptx: [ZIP, 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  xls: [OLE, 'application/vnd.ms-excel'],
+  doc: [OLE, 'application/msword'],
+  ppt: [OLE, 'application/vnd.ms-powerpoint'],
+};
+const TEXT_BY_EXT = { csv: 'text/csv', txt: 'text/plain' };
+const looksLikeText = (b) => !b.subarray(0, 4096).includes(0);
+
+/**
+ * Type of a general order attachment: any document/image, Office file, or
+ * plain CSV/TXT. Returns null for anything else (executables, HTML, …).
+ */
+const detectAttachmentMime = (buffer, filename = '') => {
+  const known = detectMime(buffer);
+  if (known) return known;
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) return null;
+  const ext = String(filename).toLowerCase().split('.').pop();
+  const office = OFFICE_BY_EXT[ext];
+  if (office && office[0](buffer)) return office[1];
+  if (TEXT_BY_EXT[ext] && looksLikeText(buffer)) return TEXT_BY_EXT[ext];
+  return null;
+};
+
+module.exports = { detectMime, detectAttachmentMime, DOCUMENT_MIMES, IMAGE_MIMES };

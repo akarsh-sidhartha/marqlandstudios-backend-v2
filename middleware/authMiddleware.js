@@ -15,7 +15,6 @@ const ROUTE_PERMISSIONS = {
   '/examples':                null,   // reference/demo endpoint — see routes/exampleRoutes.js
   '/public-site':             null,   // public-facing site routes
   '/vendors/media':           null,   // OneDrive media proxy — auth handled by Graph bearer token
-  '/orders/proxy-attachment': null,   // OneDrive order attachment proxy — same pattern
   '/job-work/media':          null,   // OneDrive job-work image proxy — same pattern; MUST stay above '/job-work' below (first-prefix-match wins)
   // NEW: Supplier Portal — suppliers can only ever hit /api/suppliers/*.
   // They deliberately do NOT get access to '/products' (that stays
@@ -37,6 +36,7 @@ const ROUTE_PERMISSIONS = {
   '/v2/media':                 ['supplier', 'inventory', 'sales', 'accounts', 'admin'],
   '/v2/uploads':               ['supplier', 'inventory', 'sales', 'accounts', 'admin'],
   '/v2/jobs':                  ['supplier', 'inventory', 'sales', 'accounts', 'admin'],
+  '/v2/orders':                ['sales', 'accounts', 'admin'],
   // NEW: admin review queue for supplier submissions — admin only.
   '/admin/supplier-products':  ['admin'],
   '/vendors':                 ['accounts', 'admin'],

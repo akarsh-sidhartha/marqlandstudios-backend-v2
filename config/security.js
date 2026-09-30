@@ -53,6 +53,7 @@ const rateLimits = {
   global: { capacity: 120, refillPerSec: 2 },        // ~2 req/sec sustained per client, 120 burst
   auth: { capacity: 10, refillPerSec: 10 / 300 },    // 10 attempts per 5 min sustained — brute-force resistant
   write: { capacity: 30, refillPerSec: 0.5 },        // stricter bucket for mutating example endpoints
+  orderWrite: { capacity: 60, refillPerSec: 2 },     // per user — inline procurement edits are frequent
 };
 
 module.exports = { allowedOrigins, corsOptions, helmetOptions, rateLimits };

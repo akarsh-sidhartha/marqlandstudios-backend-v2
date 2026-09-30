@@ -244,24 +244,31 @@ router.get('/', async (req, res) => {
   }
 });
 
-/** GET /api/portal/unread-counts (UNCHANGED) */
+/**
+ * GET /api/portal/unread-counts
+ * Polled every 15s by Order Management. Counted inside MongoDB — only the
+ * count and the last client message leave the database, instead of every
+ * message of every active portal being loaded and filtered in Node.
+ */
 router.get('/unread-counts', async (req, res) => {
   try {
-    const portals = await ClientPortal.find({ status: 'active' }, { orderId: 1, messages: 1 }).lean();
-    const result  = {};
-    portals.forEach(portal => {
-      const orderId = portal.orderId?.toString();
-      if (!orderId) return;
-      const clientMsgs = (portal.messages || []).filter(m => m.sender === 'client');
-      const last       = clientMsgs[clientMsgs.length - 1];
-      result[orderId]  = {
-        clientCount:       clientMsgs.length,
+    const rows = await ClientPortal.aggregate([
+      { $match: { status: 'active', orderId: { $ne: null } } },
+      { $project: { orderId: 1, client: { $filter: { input: { $ifNull: ['$messages', []] }, cond: { $eq: ['$$this.sender', 'client'] } } } } },
+      { $project: { orderId: 1, clientCount: { $size: '$client' }, last: { $arrayElemAt: ['$client', -1] } } },
+      { $project: { orderId: 1, clientCount: 1, 'last.text': 1, 'last.createdAt': 1, 'last.attachmentName': { $arrayElemAt: ['$last.attachments.name', 0] } } },
+    ]);
+    const result = {};
+    rows.forEach(({ orderId, clientCount, last }) => {
+      result[orderId.toString()] = {
+        clientCount,
         lastClientMessage: last
-          ? (last.text?.slice(0, 80) || (last.attachments?.length ? `📎 ${last.attachments[0].name}` : ''))
+          ? (last.text?.slice(0, 80) || (last.attachmentName ? `📎 ${last.attachmentName}` : ''))
           : '',
         lastClientAt: last?.createdAt || null,
       };
     });
+    res.set('Cache-Control', 'private, no-store');
     res.json(result);
   } catch (err) {
     res.status(500).json({ message: err.message });

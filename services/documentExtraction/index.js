@@ -27,6 +27,7 @@ const ocrEngine = require('./ocrEngine');
 const { buildLayout } = require('./layout');
 const { parseInvoice } = require('./parsers/invoiceParser');
 const { parsePayment } = require('./parsers/paymentParser');
+const { parseQuote } = require('./parsers/quoteParser');
 const sharp = require('sharp');
 const { detectMime } = require('../../utils/fileType');
 const { fiscalPeriod } = require('./parsers/primitives');
@@ -76,6 +77,38 @@ const countFound = (obj) =>
   Object.entries(obj).filter(([k, v]) => !k.startsWith('_') && v !== null && v !== undefined && v !== '').length;
 
 /**
+ * One read of a PDF (text layer, or OCR when scanned) or an image (OCR) into
+ * positioned text fragments. Shared by every document type.
+ */
+const readFragments = async (buffer, mime) => {
+  if (mime === 'application/pdf') {
+    try {
+      return await extractPdf(buffer);
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      throw AppError.unprocessable('This PDF could not be read — it may be damaged or password-protected.', { reason: err.message });
+    }
+  }
+  if (mime?.startsWith('image/')) return { fragments: await ocrEngine.recognize(buffer), source: 'ocr' };
+  throw AppError.unprocessable('Unsupported file type. Upload a PDF, JPG, PNG or WEBP.');
+};
+
+/**
+ * Reads a sales quote into its header fields and line items
+ * (see parsers/quoteParser.js).
+ */
+const extractQuote = async (buffer) => {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw AppError.badRequest('No document received.');
+  const mime = detectMime(buffer);
+  const started = Date.now();
+  const { fragments, source } = await readFragments(buffer, mime);
+  const quote = parseQuote(buildLayout(fragments));
+  const meta = { source, mimeType: mime, items: quote.items.length, ms: Date.now() - started };
+  logger.info('Quote extracted', meta);
+  return { ...quote, _meta: meta };
+};
+
+/**
  * @param {Buffer} buffer
  * @param {string} [declaredMime] — client-declared type; the real type is sniffed from the bytes
  * @param {'invoice'|'pi'|'payment'} [docType='invoice']
@@ -89,27 +122,13 @@ const extractDocument = async (buffer, declaredMime, docType = 'invoice') => {
   if (declaredMime && mime && declaredMime !== mime) logger.debug('Declared mime differs from content', { declaredMime, mime });
   const started = Date.now();
 
-  let fragments;
-  let source;
+  let { fragments, source } = await readFragments(buffer, mime);
   let secondRead = null;
-  if (mime === 'application/pdf') {
-    try {
-      ({ fragments, source } = await extractPdf(buffer));
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      throw AppError.unprocessable('This PDF could not be read — it may be damaged or password-protected.', { reason: err.message });
-    }
-  } else if (mime?.startsWith('image/')) {
-    fragments = await ocrEngine.recognize(buffer);
-    source = 'ocr';
-    // Small text: Tesseract drops different characters at 1x and 2x, so read
-    // both and merge field by field (see mergeReads).
-    if (!(await imageIsSmall(buffer)) && ocrEngine.isSmallText(fragments)) {
-      secondRead = await ocrEngine.recognize(buffer, { upscale: true });
-      source = 'ocr-2pass';
-    }
-  } else {
-    throw AppError.unprocessable('Unsupported file type. Upload a PDF, JPG, PNG or WEBP.');
+  // Small text: Tesseract drops different characters at 1x and 2x, so read
+  // both and merge field by field (see mergeReads).
+  if (source === 'ocr' && !(await imageIsSmall(buffer)) && ocrEngine.isSmallText(fragments)) {
+    secondRead = await ocrEngine.recognize(buffer, { upscale: true });
+    source = 'ocr-2pass';
   }
 
   const ctx = context();
@@ -133,4 +152,4 @@ const extractDocument = async (buffer, declaredMime, docType = 'invoice') => {
 
 const status = () => ({ available: true, provider: 'open-source', engines: ['pdf.js', 'tesseract'], reason: 'ok' });
 
-module.exports = { extractDocument, status, DOC_TYPES };
+module.exports = { extractDocument, extractQuote, status, DOC_TYPES };

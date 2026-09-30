@@ -35,6 +35,10 @@ const supplier = require('../../controllers/v2/supplierProductController');
 const mediaCtl = require('../../controllers/v2/mediaController');
 const uploads = require('../../controllers/v2/uploadController');
 const jobs = require('../../controllers/v2/jobController');
+const orders = require('../../controllers/v2/orderController');
+const orderSchema = require('../../validation/schemas/order.schema');
+const documentUpload = require('../../middleware/documentUpload');
+const { rateLimits } = require('../../config/security');
 
 const router = express.Router();
 router.use(requestTimeout(10_000));
@@ -78,6 +82,40 @@ router.post('/media/images', requestTimeout(30_000), (req, res, next) => imageUp
 }), h(mediaCtl.uploadImage));
 router.post('/media/image-search', validate({ body: schema.imageSearch }), h(mediaCtl.imageSearch));
 router.post('/media/image-imports', validate({ body: schema.imageImport }), h(mediaCtl.importImages));
+
+// ── Orders (admin app — Order Management) ──────────────────────────────────
+// Writes are limited per user (inline procurement edits are frequent but a
+// runaway script is stopped). OneDrive uploads and quote OCR get a wider
+// timeout than the 10s default; everything else answers within 10s.
+const orderWrite = createRateLimiter({ ...rateLimits.orderWrite, keyGenerator: (req) => `${req.user?.id || req.ip}:orders` });
+const orderFiles = documentUpload.many('files', {
+  maxFiles: 15,
+  accept: (req) => ({ screenshot: 'image', quote: 'document' }[req.query.category] || 'attachment'),
+});
+const quoteFile = (required) => documentUpload('quote', { required });
+const os = orderSchema;
+
+router.get('/orders/meta', h(orders.meta));
+router.get('/orders/vendor-options', h(orders.vendorOptions));
+router.get('/orders', validate({ query: os.listQuery }), h(orders.list));
+router.post('/orders', orderWrite, validate({ body: os.createOrder }), once, h(orders.create));
+router.get('/orders/:id', validate({ params: os.idParam }), h(orders.getOne));
+router.patch('/orders/:id', orderWrite, validate({ params: os.idParam, body: os.updateOrder }), once, h(orders.update));
+router.delete('/orders/:id', orderWrite, validate({ params: os.idParam }), h(orders.remove));
+
+router.post('/orders/:id/quote/parse', requestTimeout(60_000), orderWrite, validate({ params: os.idParam }), quoteFile(true), h(orders.parseQuote));
+router.post('/orders/:id/start', requestTimeout(60_000), orderWrite, validate({ params: os.idParam }), quoteFile(false), validate({ body: os.startProject }), once, h(orders.start));
+router.post('/orders/:id/complete', orderWrite, validate({ params: os.idParam, body: os.completeOrder }), once, h(orders.complete));
+router.post('/orders/:id/timeline', orderWrite, validate({ params: os.idParam, body: os.timeline }), once, h(orders.postTimeline));
+
+router.post('/orders/:id/items', orderWrite, validate({ params: os.idParam, body: os.addItems }), once, h(orders.addItems));
+router.patch('/orders/:id/items/:itemId', orderWrite, validate({ params: os.itemParam, body: os.updateItem }), h(orders.updateItem));
+router.delete('/orders/:id/items/:itemId', orderWrite, validate({ params: os.itemParam }), h(orders.removeItem));
+
+router.get('/orders/:id/files', requestTimeout(20_000), validate({ params: os.idParam }), h(orders.listFiles));
+router.post('/orders/:id/files', requestTimeout(120_000), orderWrite, validate({ params: os.idParam, query: os.fileQuery }), orderFiles, once, h(orders.uploadFiles));
+router.get('/orders/:id/files/:itemId/content', requestTimeout(120_000), validate({ params: os.fileParam, query: os.contentQuery }), h(orders.fileContent));
+router.delete('/orders/:id/files/:itemId', requestTimeout(20_000), orderWrite, validate({ params: os.fileParam }), h(orders.removeFile));
 
 // ── Resumable uploads ────────────────────────────────────────────────────────
 router.post('/uploads', validate({ body: schema.createUpload }), h(uploads.start));

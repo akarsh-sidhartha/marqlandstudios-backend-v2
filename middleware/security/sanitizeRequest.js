@@ -35,7 +35,7 @@ const XSS_OPTIONS = {
 const EMPTY_FIELD_SET = new Set();
 
 const RICH_TEXT_ROUTES = [
-  { match: /^\/api\/orders(\/|$)/, fields: new Set(['description']) },
+  { match: /^\/api\/(v2\/)?orders(\/|$)/, fields: new Set(['description']) },
 ];
 
 // Returns the Set of rich-text-allowed field names for this request's

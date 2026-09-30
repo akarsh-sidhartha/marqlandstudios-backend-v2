@@ -81,4 +81,36 @@ const blankPdf = async () => {
   return Buffer.from(await pdf.save());
 };
 
-module.exports = { zohoInvoicePdf, zohoQuotePdf, blankPdf };
+/**
+ * Multi-item quote in Zoho's layout: a generic item title ("Goodies") with
+ * the real product on the line below, units under the quantity, a
+ * description that wraps onto two lines, and a service row.
+ */
+const zohoMultiItemQuotePdf = () => draw([
+  [40, 50, 'Marqland Studios', 14],
+  [480, 50, 'QUOTE', 12],
+  [40, 86, 'GSTIN: 29ACGFM9082Q1Z5'],
+  [40, 120, 'Quote#'], [120, 120, ': QT-26-27/000099'],
+  [40, 132, 'Quote Date'], [120, 132, ': 07/09/2026'],
+  [40, 160, 'Bill To'], [300, 160, 'Ship To'],
+  [40, 172, 'Example Client Pvt Ltd'],
+  [40, 232, 'Subject :'],
+  [40, 244, 'Goodies - Team Offsite'],
+  [48, 270, '#'], [66, 270, 'Item & Description'], [193, 270, 'HSN/SAC'], [263, 270, 'Qty'], [315, 270, 'Rate'], [363, 270, 'Amount'], [429, 270, 'CGST'], [485, 270, 'SGST'], [540, 270, 'Total'],
+  [48, 290, '1'], [65, 290, 'Goodies'], [191, 290, '8308'], [274, 290, '1'], [303, 290, '5,278.00'], [364, 290, '5,278.00'], [439, 290, '9%'], [495, 290, '9%'], [531, 290, '6,228.04'],
+  [65, 300, 'Stand Mixer Deluxe'], [267, 300, 'pcs'],
+  [48, 320, '2'], [65, 320, 'Goodies'], [191, 320, '8308'], [274, 320, '2'], [303, 320, '4,716.00'], [364, 320, '9,432.00'], [439, 320, '9%'], [495, 320, '9%'], [527, 320, '11,129.76'],
+  [65, 330, 'Travel Backpack 20L'], [267, 330, 'pcs'],
+  [65, 340, '- Black'],
+  [48, 360, '3'], [65, 360, 'Transportation Services'], [191, 360, '996511'], [274, 360, '1'], [303, 360, '2,100.00'], [364, 360, '2,100.00'], [439, 360, '9%'], [495, 360, '9%'], [531, 360, '2,478.00'],
+  [65, 370, 'For all units of goodies'],
+  [65, 380, 'shipments'],
+  [298, 400, 'Sub Total'], [355, 400, 'Rs.16,810.00'], [420, 400, '1,512.90'], [475, 400, '1,512.90'], [522, 400, 'Rs.19,835.80'],
+  [342, 415, 'Rounding'], [543, 415, '0.20'],
+  [46, 425, 'Total In Words'],
+  [342, 432, 'Total'], [520, 432, 'Rs.19,836.00'],
+  [40, 460, 'Notes'],
+  [40, 472, 'Looking forward for your business.'],
+]);
+
+module.exports = { zohoInvoicePdf, zohoQuotePdf, zohoMultiItemQuotePdf, blankPdf };

@@ -104,10 +104,12 @@ const v2Routes = require('./routes/v2');
 const jobQueue = require('./lib/jobs/jobQueue');
 const { registerMediaJobs } = require('./services/media/mediaJobs');
 const { registerCatalogJobs } = require('./services/catalog/catalogJobs');
+const { registerOrderJobs } = require('./services/orders/orderJobs');
 const uploadSessions = require('./services/media/uploadSessionService');
 const { cleanupStagedImages } = require('./services/media/productMediaService');
 registerMediaJobs();
 registerCatalogJobs();
+registerOrderJobs();
 const jobWorkVendorRoutes = require('./routes/job-work/jobWorkVendorRoutes');
 const jobWorkAdminRoutes  = require('./routes/job-work/jobWorkAdminRoutes');
 // ─── Static File Serving (Uploads Only) ──────────────────────────────────────
